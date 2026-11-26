@@ -1299,9 +1299,10 @@ pub(crate) struct HostList {
     /// What the list does with depth textures that have a colour twin, by
     /// twin ([`TwinUse`]).
     twins: Mutex<std::collections::HashMap<usize, TwinUse>>,
-    /// The list that runs those transitions just before this one, made
-    /// when the list first has such transitions ([`lazy_prelude`]).
-    prelude: OnceLock<Option<Prelude>>,
+    /// The list that runs those transitions just before this one, taken
+    /// when the list is first submitted with such transitions and given
+    /// back at its reset ([`take_prelude`], [`lazy_prelude`]).
+    prelude: Mutex<Option<Prelude>>,
     /// The pipelines the list binds, for reports of slow submissions.
     pipelines: std::sync::Arc<Mutex<std::collections::BTreeSet<String>>>,
     /// What its indirect executions ran, for the report of a removed device.
@@ -1342,6 +1343,50 @@ pub(crate) struct HostList {
 
 /// A list's prelude: an allocator and a closed list.
 type Prelude = (ID3D12CommandAllocator, ID3D12GraphicsCommandList);
+
+/// A prelude in [`PRELUDES`].
+struct IdlePrelude(Prelude);
+
+// SAFETY: D3D12 objects (free-threaded), touched by nobody while idle.
+unsafe impl Send for IdlePrelude {}
+
+/// Preludes of host lists that ran ([`HostList::reset`]), for the next list
+/// that needs one. Kept by its list for the list's life, a prelude held its
+/// allocator's command memory while the list sat idle or recorded: 952 for
+/// 1,476 host lists, near 1 GB of a 2 GB aperture segment on an RX 6700 XT
+/// (`FINDINGS-6700XT.md`), where only lists being submitted or in the air
+/// need one.
+static PRELUDES: Mutex<Vec<IdlePrelude>> = Mutex::new(Vec::new());
+
+/// The most preludes kept idle, and while an aperture segment of the card's
+/// memory is near its limit ([`trim_preludes`]).
+const PRELUDES_MOST: (usize, usize) = (128, 16);
+
+/// A prelude for a list about to be submitted: an idle one, or a new one.
+fn take_prelude() -> Option<Prelude> {
+    let idle = PRELUDES.lock().unwrap_or_else(|e| e.into_inner()).pop();
+    idle.map(|IdlePrelude(prelude)| prelude).or_else(|| host().and_then(|h| h.make_prelude()))
+}
+
+/// Keeps `prelude`, whose submission has finished, for [`take_prelude`].
+fn give_prelude(prelude: Prelude) {
+    let mut idle = PRELUDES.lock().unwrap_or_else(|e| e.into_inner());
+    if idle.len() < PRELUDES_MOST.0 {
+        idle.push(IdlePrelude(prelude));
+    }
+}
+
+/// Lets idle preludes past [`PRELUDES_MOST`]'s second number go, and their
+/// command memory with them.
+pub(crate) fn trim_preludes() {
+    let gone: Vec<IdlePrelude> = {
+        let mut idle = PRELUDES.lock().unwrap_or_else(|e| e.into_inner());
+        let keep = idle.len().min(PRELUDES_MOST.1);
+        idle.split_off(keep)
+    };
+    // (Outside the lock: freeing lists takes the graphics kernel's time.)
+    drop(gone);
+}
 
 /// Whether a host list's prelude is made when the list first needs one. A
 /// prelude runs the texture transitions and twin copies a list needs before
@@ -4238,10 +4283,7 @@ impl Host {
                 &allocator,
                 None,
             )?;
-            let prelude = OnceLock::new();
-            if !lazy_prelude() {
-                let _ = prelude.set(self.make_prelude());
-            }
+            let prelude = Mutex::new(if lazy_prelude() { None } else { self.make_prelude() });
             #[cfg(feature = "diagnostics")]
             let notes = std::sync::Arc::<Mutex<Vec<Note>>>::default();
             let pipelines = std::sync::Arc::<Mutex<std::collections::BTreeSet<String>>>::default();
@@ -5412,6 +5454,7 @@ impl Host {
         let tight = self.adapter.as_ref().is_some_and(segments::tight);
         if tight {
             crate::list::trim_idle();
+            trim_preludes();
         }
         if told && !late_writes() {
             self.settle(&mut submitted, WHY_WRITES);
@@ -6561,6 +6604,11 @@ impl HostList {
         let started = std::time::Instant::now();
         let _resetting = crate::timeline::span("resetting a host list");
         self._alive.used();
+        // Every submission of the list has run, its prelude's too.
+        let prelude = self.prelude.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if let Some(prelude) = prelude {
+            give_prelude(prelude);
+        }
         *self.coming.lock().unwrap_or_else(|e| e.into_inner()) = None;
         *self.deferred() = Deferred::default();
         self.states.lock().unwrap_or_else(|e| e.into_inner()).clear();
@@ -6945,11 +6993,11 @@ impl HostList {
         if barriers.is_empty() && syncs.is_empty() {
             return None;
         }
-        let Some((allocator, list)) = self
-            .prelude
-            .get_or_init(|| host().and_then(|h| h.make_prelude()))
-            .as_ref()
-        else {
+        let mut held = self.prelude.lock().unwrap_or_else(|e| e.into_inner());
+        if held.is_none() {
+            *held = take_prelude();
+        }
+        let Some((allocator, list)) = held.as_ref() else {
             fail(format_args!("no host list for a state prelude"));
         };
         // SAFETY: the prelude is not executing (every submission is waited
