@@ -1276,12 +1276,80 @@ pub(crate) fn read_from(layout: &victory_formats::texture::Layout, first: u32) -
     if layout.bytes_from(first) < layout.size { first } else { 0 }
 }
 
+/// The share of the card's memory budget in use, in percent (asked at most
+/// every tenth of a second).
+#[cfg(windows)]
+fn video_memory_percent() -> u64 {
+    use std::sync::atomic::Ordering::Relaxed;
+    static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let tenth = crate::host::now_ms() / 100 + 1;
+    let last = LAST.load(Relaxed);
+    if last >> 8 == tenth {
+        return last & 0xff;
+    }
+    let percent = crate::host::host()
+        .and_then(|h| h.video_memory())
+        .and_then(|[budget, used, ..]| (budget > 0).then(|| (u128::from(used) * 100 / u128::from(budget)).min(255) as u64))
+        .unwrap_or(0);
+    LAST.store(tenth << 8 | percent, Relaxed);
+    percent
+}
+
+/// The largest side a placed 2D texture's host copy has, from
+/// `VICTORY_TEXTURE_MAX`: unset or `0` none (the default: the title's
+/// detail); `<n>` that many texels; `auto` 1024, then 512 from 92 % of the
+/// card's memory budget and 256 from 97 % (beloooo's rule in
+/// avatarmanz/VIctory-7900XTX e942896, after VIctory-vitesse 7ada43b6,
+/// where it is on by default). Less memory for coarser textures.
+#[cfg(windows)]
+fn texture_max() -> Option<u64> {
+    #[derive(Clone, Copy)]
+    enum Cap {
+        Off,
+        Side(u64),
+        Auto,
+    }
+    static CAP: std::sync::LazyLock<Cap> = std::sync::LazyLock::new(|| {
+        let cap = match std::env::var("VICTORY_TEXTURE_MAX").as_deref().map(str::trim) {
+            Ok("auto") => Cap::Auto,
+            Ok(n) => n.parse().ok().filter(|&n| n > 0).map_or(Cap::Off, Cap::Side),
+            Err(_) => Cap::Off,
+        };
+        if !matches!(cap, Cap::Off) {
+            tracing::info!("texture host copies capped (VICTORY_TEXTURE_MAX)");
+        }
+        cap
+    });
+    match *CAP {
+        Cap::Off => None,
+        Cap::Side(n) => Some(n),
+        Cap::Auto => Some(match video_memory_percent() {
+            0..92 => 1024,
+            92..97 => 512,
+            _ => 256,
+        }),
+    }
+}
+
+/// How many of a texture's largest levels its host copy leaves out so that
+/// no side passes [`texture_max`] (at least its smallest level stays).
+#[cfg(windows)]
+fn over_cap(desc: &ResourceDesc) -> u32 {
+    let Some(max) = texture_max() else { return 0 };
+    let mut skip = 0u32;
+    while (desc.width >> skip > max || u64::from(desc.height) >> skip > max) && skip + 1 < u32::from(desc.mip_levels) {
+        skip += 1;
+    }
+    skip
+}
+
 /// The level a host copy begins at for views that start at `first`: one the
-/// host can have as a texture's level 0 ([`read_from`]; block-compressed
-/// formats in whole blocks).
+/// host can have as a texture's level 0 ([`read_from`], [`over_cap`];
+/// block-compressed formats in whole blocks).
 #[cfg(windows)]
 fn base_level(desc: &ResourceDesc, first: u32) -> u32 {
     const TEXTURE_2D: u32 = 3;
+    let first = first.max(over_cap(desc));
     if first == 0
         || !fills(desc)
         || desc.dimension != TEXTURE_2D
@@ -1621,11 +1689,11 @@ fn hosted(this: This, make: bool) -> Option<Made> {
             let wanted = r.host.wanted.load(Relaxed);
             let viewed = crate::descriptor::host::first_viewed(r.data() as u64).unwrap_or(u32::MAX);
             let first = wanted.min(viewed);
-            if first != u32::MAX {
-                base = base_level(&r.desc, first);
-            }
-            // The store has its larger levels: made whole at once.
+            base = base_level(&r.desc, if first == u32::MAX { 0 } else { first });
+            // The store has its larger levels: made whole at once (not
+            // under a cap).
             if base > 0
+                && over_cap(&r.desc) == 0
                 && tiled.is_none()
                 && let Some(found) = stored_levels(r, first)
             {

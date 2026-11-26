@@ -212,6 +212,10 @@ sets `VICTORY_UPSCALER=6` for it (`-More @{VICTORY_UPSCALER='7'}` brings
 FidelityFX back). `-More @{VICTORY_OUTPUT='1920x1080'}` keeps the Series X
 profile and renders at 1080p, 12-16 fps. Native output runs 9-12 (see
 [Milestones](#milestones)).
+`-TextureMax auto` caps textures' largest side at 1024 texels, 512 from 92 % of
+the card's memory budget and 256 from 97 % (`-TextureMax 1024`: a fixed size):
+less card memory for coarser textures. Off by default; upstream has it on
+(beloooo's rule).
 If the device is still lost on your PC, `-More @{VICTORY_RELAY='0'}` waits for
 every submission (slower, but it was the one setting that ran before this fork's
 changes).
