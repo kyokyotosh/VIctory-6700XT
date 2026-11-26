@@ -4,10 +4,10 @@ Scope: title `D:\kyoto-dump-gta\game.exe` (title ID 7952987A) on this machine, l
 
 ## Summary
 
-- The host device is removed (`0x887A0005`, then `0x887A0007`) during the first world load, about 60–90 s after start, whenever submissions are sent ahead (`VICTORY_LATE_WAIT` > 0, which `VICTORY_RELAY` turns on).
-- **Cause, from a GPU ETW trace:** the video memory manager runs out of room in **segment 3**, a 2 GB segment for CPU-cached system memory. It holds the driver's command buffers (1 MB + 64 KB per D3D12 command list), our upload scratch chunks and our `D3D12_HEAP_TYPE_CUSTOM` write-back buffers. The next allocation that can only live there cannot be made resident (`ReserveResource` → `0xC0000001`, 46 tries), and the kernel scheduler marks our device as faulted (`VidSchMarkDeviceAsError`, reason 12). No GPU hang, no page fault, no timed-out packet.
-- With send-ahead the number of host lists climbs from ~830 to ~1,150–1,200 at the world load, and about 900 new command lists are made in 5.5 s (lists dropped from the 512-list idle pool and made again). With every submission waited for (`VICTORY_RELAY=0`) the count stays at 674 and segment 3 never fills.
-- Workaround on this card: `-More @{VICTORY_RELAY='0'}` (2.8 fps in the world, 360 ms/frame).
+- The host device was removed (`0x887A0005`, then `0x887A0007`) during the first world load, about 60–90 s after start, whenever submissions were sent ahead (`VICTORY_LATE_WAIT` > 0, which `VICTORY_RELAY` turns on).
+- **Cause, from a GPU ETW trace:** the video memory manager runs out of room in a **2 GB aperture segment** (system memory the card maps; segment 2 to `D3DKMTQueryStatistics`, 3 in ETW). It holds the driver's command buffers (1 MB + 64 KB per D3D12 command list, growing with what a list records), our upload scratch chunks and our `D3D12_HEAP_TYPE_CUSTOM` write-back buffers. The next allocation that can only live there cannot be made resident (`ReserveResource` → `0xC0000001`, 46 tries), and the kernel scheduler marks our device as faulted (`VidSchMarkDeviceAsError`, reason 12). No GPU hang, no page fault, no timed-out packet.
+- With send-ahead the host lists climbed from ~830 to ~1,150–1,250 at the world load: `land()` held the newest 64 flights of finished lists (up to 716 lists), and up to 240 title lists were in flight. With every submission waited for (`VICTORY_RELAY=0`) the count stays at 674 and the segment never fills.
+- **Fixed** (commits `f173347`, `018d372` and the back-off that holds): finished lists go back to the pool at once, and while the segment is above 80% every flight lands as it is sent and the idle pool is trimmed to 64 lists. Default `play.ps1` settings now get through the world load: **4.5–4.7 fps (212 ms/frame) in the world, no device removal in 180 s**, against 2.8 fps with `VICTORY_RELAY=0`.
 
 ## Hardware and system
 
@@ -50,11 +50,13 @@ Release build (`cargo build --release --locked -p victory`), `Play-VIctory.cmd`'
 
 ### PR #225 (card-buffer limits for 10–12 GB cards), applied uncommitted to `shadow.rs`
 
-| Settings | Card buffer limits (log) | Budget cut at | Removed at | Result |
-|---|---|---|---|---|
-| `play.ps1` defaults | min 64 KiB, max 1536 MiB | 14:42:42 | 14:42:49 | Removed; 1,173 host lists alive |
+| Build / settings | Card buffer limits (log) | Result |
+|---|---|---|
+| before the fix, `play.ps1` defaults | min 64 KiB, max 1536 MiB | Removed 7 s after the budget cut; 1,173 host lists alive |
+| with the holding back-off | min 64 KiB, max 1536 MiB | Survives 180 s; **1.2 fps** (796 ms a frame on the GPU): the card's memory 11,679 MB in use against a 10,097 MB budget |
+| with the holding back-off | min 16 MiB, max 512 MiB (the overrides, as before the PR) | Survives 180 s; **4.7 fps** (127 ms on the GPU), 10,077 MB in use against 9,997 MB |
 
-It changes where title buffer copies live, not the host lists or the other segment-3 users, so it does not touch this failure.
+On this card the PR hurts: the system cuts the budget to ~10.0–10.4 GB at the world load, and 1,536 MiB of card buffers put the card 1.6 GB over it, so the video memory manager pages and the card slows five-fold. Not committed to this fork.
 
 ## GPU ETW trace (`wpr -start GPU -filemode`, default settings)
 
@@ -86,7 +88,8 @@ Where the host lists are (a temporary log at each 25th new host list, default se
 |---|---|---|---|---|
 | before, `VICTORY_BURY_LAG=8` | 14:50:45 | 14:51:29 | 1,256 (180 title lists in flight) | 0.6–30 |
 | landed lists given back at once (`land()` → `list::recycle_landed`, what they held kept through `retire`) | 14:54:49 | 14:55:15 | 1,235 (224 in flight) | 3.7–30 |
-| + back-off on a full aperture segment (`host/segments.rs`) | 15:00:25 | 15:01:13 | 1,208 (239 in flight) | 6.7–30 |
+| + back-off on a full aperture segment (`host/segments.rs`, `018d372`) | 15:00:25 | 15:01:13 | 1,208 (239 in flight) | 6.7–30 |
+| + back-off on every send, all flights land while tight, idle pool trimmed to 64, on at 80% / off at 70% | 15:18:59 | — (180 s) | 1,052 | **4.5–4.7 steady** (with PR #225 card limits: 1.2) |
 
 Segments as the graphics kernel reports them on this PC (`D3DKMTQueryStatistics`, logged at the start):
 
@@ -98,7 +101,7 @@ Segments as the graphics kernel reports them on this PC (`D3DKMTQueryStatistics`
 | 3 | yes | 30,610 MB | 0 MB |
 | 4 | yes | unlimited | 90 MB |
 
-Segment 2 (ETW's segment 3) is the one that fills. In the last run the back-off first fired at 1,911 MB (93%): the segment is only looked at when the idle pool is empty, and once it fired, lists alive still grew from 1,183 to 1,208 and the in-flight count to 239.
+Segment 2 (ETW's segment 3) is the one that fills. With `018d372` the back-off first fired at 1,911 MB (93%): it looked at the segment only when the idle pool was empty, and the in-flight count kept growing. With the back-off on every send it fires at ~1,650 MB, trimming the idle pool frees ~250–300 MB (1,650 → 1,350–1,430 MB), and the segment stayed under 1,700 MB.
 
 ## What every failing run shows
 
@@ -127,8 +130,8 @@ These are real bugs but not the trigger (they appear with relay 0, which survive
 
 ## Next steps
 
-1. Make the back-off hold: look at the segment on every send (not only with the idle pool empty), and keep the lists in flight (in host lists, not title lists) under what the segment has room for. The other segment-2 users (upload scratch, `CUSTOM` write-back host copies) may need the same check.
-2. Test: the default settings get through the world load; segment 2 stays under its limit (the log line says when it passes 85%).
+1. Frame rate: with the segment above 80% the back-off stays on and every flight lands as it is sent; the frame is ~83 ms preparing and ~127 ms on the card. Fewer host lists alive (their command memory) would let send-ahead run freely: the title's own ~650 lists each hold a host list and its allocator's high-water command memory.
+2. The card's memory runs slightly over the cut budget late in runs (10,077 / 9,997 MB); keep an eye on the GPU time if it creeps up.
 3. Fix the id 646 / id 538 validation errors separately.
 
 ## Relay and late-wait semantics (from code)
