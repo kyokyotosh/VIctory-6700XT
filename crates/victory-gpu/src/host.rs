@@ -5406,9 +5406,13 @@ impl Host {
         };
         LATE_STATS[0].fetch_add(1, Ordering::Relaxed);
         RELAY_MOVED.notify_one();
-        // An aperture segment near its limit with no idle host list: the
-        // flights land and give their lists back before more are made.
-        let tight = !crate::list::has_idle() && self.adapter.as_ref().is_some_and(segments::tight);
+        // An aperture segment near its limit: every flight lands before the
+        // next is sent, as without sending ahead, and idle host lists past a
+        // few go, their command memory with them ([`segments`]).
+        let tight = self.adapter.as_ref().is_some_and(segments::tight);
+        if tight {
+            crate::list::trim_idle();
+        }
         if told && !late_writes() {
             self.settle(&mut submitted, WHY_WRITES);
         } else if sizes {

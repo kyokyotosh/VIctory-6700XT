@@ -82,9 +82,11 @@ pub(crate) fn log(adapter: &IDXGIAdapter3) {
 }
 
 /// The share of an aperture segment's limit from which it counts as full
-/// (`VICTORY_SEGMENT_TIGHT`, in percent; 85 by default, 0: never).
+/// (`VICTORY_SEGMENT_TIGHT`, in percent; 80 by default, 0: never). It
+/// counts as no longer full only below 10 points less: near the limit the
+/// video memory manager pages, and the card waited a second a frame.
 static TIGHT_PERCENT: LazyLock<u64> =
-    LazyLock::new(|| std::env::var("VICTORY_SEGMENT_TIGHT").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(85));
+    LazyLock::new(|| std::env::var("VICTORY_SEGMENT_TIGHT").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(80));
 
 /// How often the segments are looked at, at most.
 const LOOK_MS: u64 = 100;
@@ -109,6 +111,7 @@ pub(crate) fn tight(adapter: &IDXGIAdapter3) -> bool {
             .into_iter()
             .filter(|s| s.aperture && s.limit > 0)
             .max_by_key(|s| s.resident * 1000 / s.limit);
+        let percent = if TIGHT.load(Ordering::Relaxed) { percent.saturating_sub(10) } else { percent };
         let tight = fullest.is_some_and(|s| s.resident * 100 > s.limit * percent);
         if TIGHT.swap(tight, Ordering::Relaxed) != tight
             && let Some(s) = fullest
@@ -120,7 +123,7 @@ pub(crate) fn tight(adapter: &IDXGIAdapter3) -> bool {
                 limit_mb = s.limit >> 20,
                 "an aperture segment of the card's memory {} {percent}% of its limit: flights sent ahead {}",
                 if tight { "passed" } else { "fell below" },
-                if tight { "land before host lists are made" } else { "go on as before" }
+                if tight { "land as they are sent and idle host lists go" } else { "go on as before" }
             );
         }
     }

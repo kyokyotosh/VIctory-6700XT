@@ -260,10 +260,27 @@ fn fresh_list() -> Option<crate::host::HostList> {
     }
 }
 
-/// Whether a host list that ran waits for [`fresh_list`].
+/// Host lists kept idle while an aperture segment of the card's memory is
+/// near its limit (`crate::host::segments`).
 #[cfg(windows)]
-pub(crate) fn has_idle() -> bool {
-    !IDLE.lock().unwrap_or_else(|e| e.into_inner()).0.is_empty()
+const IDLE_WHEN_TIGHT: usize = 64;
+
+/// Lets idle host lists past [`IDLE_WHEN_TIGHT`] go, and their allocators'
+/// command memory with them: on an RX 6700 XT that memory lies in a 2 GB
+/// aperture segment (`FINDINGS-6700XT.md`). They have run and been reset.
+#[cfg(windows)]
+pub(crate) fn trim_idle() {
+    let gone: Vec<Idle> = {
+        let mut idle = IDLE.lock().unwrap_or_else(|e| e.into_inner());
+        if idle.0.len() <= IDLE_WHEN_TIGHT {
+            return;
+        }
+        let gone = idle.0.split_off(IDLE_WHEN_TIGHT);
+        idle.1 -= gone.iter().map(|Idle(_, bytes)| bytes).sum::<u64>();
+        gone
+    };
+    // (Outside the lock: freeing lists takes the graphics kernel's time.)
+    drop(gone);
 }
 
 /// The host sides of lists whose submission has run (submissions are
