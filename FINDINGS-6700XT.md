@@ -164,6 +164,19 @@ The renderer patches (off by default), each alone at 1080p, 150 s:
 
 They stay off here.
 
+## The Series S profile and its upscaler
+
+`-Console series-s` (`play.ps1` passes `--console`) runs the steadiest, but its picture was soft, ghosted and stippled. The title's upscaler picker (`victory-loader/src/resolution.rs`) returns 6 (its own) on Series X and 7 (AMD FidelityFX) on Series S; both render at 2/3 of the output (1280x720 for 1080p). On Series S the title loads `amd_fidelityfx_upscaler_xbox.dll` from its own files (the host policy refuses a host copy); a window capture at 150 s showed a checkerboard-dithered copy of Lucia's head and shirt trailing her, and stippled walls: history that should have been rejected. The Series X runs never load it and show none of it. With `VICTORY_UPSCALER=6` (from pull request #53) the Series S profile uses the title's own upscaler: no ghost, no stipple, and no slower.
+
+| Run | Upscaler | World samples at 10 fps or more | Range |
+|---|---|---|---|
+| `run-series-s` | FidelityFX | 31 of 33 (94%) | 3.3–15.6 |
+| `run-series-s-b` | FidelityFX | 30 of 34 (88%) | 0.3–17.4 |
+| `run-look-seriess-up6` | own | 29 of 32 (91%) | 6.0–18.0 |
+| `run-seriess-up6-b` | own (`play.ps1 -Console series-s`) | 32 of 34 (94%) | 6.9–19.7 |
+
+`play.ps1 -Console series-s` now sets `VICTORY_UPSCALER=6`; steady 10 is reached with it. Also tried, no gain: `VICTORY_SUBMIT_FRAMES=2` (the title two frames ahead of the submitting thread; 78%), and the three renderer patches that run here together (88%).
+
 ## Next steps
 
 1. Frame rate: at 1080p output the submitting thread's preparing (~60 ms) sets the frame; at native output (~100 ms a frame) the card (~80 ms of work, ~1 GB over the cut budget). Next: the refreshes and the wait for the heaps' records on the submitting thread.
