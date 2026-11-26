@@ -18,7 +18,16 @@
 //! reads are copied back too (about a megabyte per such list). The copy shows
 //! what the list's last write left; a title read in between sees the frame
 //! before, as it would before the console's GPU has run.
+//!
+//! A landing writes the texture's whole range, so it goes only where title
+//! memory still holds what it held when the list was prepared, or what our
+//! last landing there left: memory the title has taken for something else
+//! since is left alone. (A landing over such memory is the likely cause of a
+//! crash in the first boat mission, 14 minutes in: a fence record of the
+//! title's in the GPU heap, read at title+0x4e9b578, was zeros, and boats ride
+//! on these textures.)
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
@@ -108,6 +117,8 @@ pub(crate) struct Target {
     pub(crate) copy: Arc<crate::resource::HostTexture>,
     layout: victory_formats::texture::Layout,
     ticket: Arc<Ticket>,
+    /// The title's bytes of the range while the list is prepared.
+    before: Vec<u8>,
 }
 
 impl Target {
@@ -117,8 +128,12 @@ impl Target {
         let _mapping = crate::watch::title_memory_reading();
         let (layout, at, size) = crate::resource::title_texture(resource)?;
         let end = at.checked_add(size).filter(|&end| at != 0 && end > at)?;
+        let mut before = vec![0u8; size];
+        if !crate::host::read_into(at as *const u8, &mut before) {
+            return None;
+        }
         let ticket = track(resource as usize, at, end);
-        Some(Self { copy, layout, ticket })
+        Some(Self { copy, layout, ticket, before })
     }
 
     pub(crate) fn owner(&self) -> usize { self.ticket.owner }
@@ -132,6 +147,7 @@ pub(crate) struct Back {
     mips: u32,
     layout: victory_formats::texture::Layout,
     ticket: Arc<Ticket>,
+    before: Vec<u8>,
 }
 
 impl Back {
@@ -194,13 +210,30 @@ pub(crate) fn record(list: &ID3D12GraphicsCommandList, target: Target) -> Option
         // SAFETY: an open list; the texture is in the copy-source state.
         unsafe { list.CopyTextureRegion(&to, 0, 0, 0, &from, None) };
     }
-    Some(Back { buffer, footprints, rows, mips, layout: target.layout, ticket: target.ticket })
+    Some(Back { buffer, footprints, rows, mips, layout: target.layout, ticket: target.ticket, before: target.before })
+}
+
+/// What our last landing left at each range's start, for the next landing's
+/// look ([`untouched`]). Few ranges are ever copied back (the ocean's); past
+/// [`LANDED_MOST`] of them the record starts over.
+static LANDED: Mutex<Option<HashMap<usize, Vec<u8>>>> = Mutex::new(None);
+const LANDED_MOST: usize = 256;
+
+/// Whether title memory (`now`) holds, in every 8-byte piece, what it held
+/// while the list was prepared (`before`) or what our last landing there left
+/// (`ours`): no one else has written it since.
+fn untouched(now: &[u8], before: &[u8], ours: Option<&[u8]>) -> bool {
+    now == before
+        || now.chunks(8).zip(before.chunks(8)).enumerate().all(|(i, (n, b))| {
+            n == b || ours.is_some_and(|o| o.get(i * 8..i * 8 + n.len()) == Some(n))
+        })
 }
 
 /// Once the list has run, tile its texels back into the same title allocation.
 pub(crate) fn land(back: &Back) {
     static COPIED: AtomicU64 = AtomicU64::new(0);
     static STALE: AtomicU64 = AtomicU64::new(0);
+    static TAKEN: AtomicU64 = AtomicU64::new(0);
     let _mapping = crate::watch::title_memory_reading();
     let _ticket_guard = TICKETS.lock().unwrap_or_else(|e| e.into_inner());
     if !back.ticket.valid.load(Ordering::Acquire) {
@@ -215,6 +248,21 @@ pub(crate) fn land(back: &Back) {
     let mut tiled = vec![0u8; size];
     // Keep title bytes the subresources do not cover.
     if !crate::host::read_into(at as *const u8, &mut tiled) {
+        return;
+    }
+    let mut landed = LANDED.lock().unwrap_or_else(|e| e.into_inner());
+    let landed = landed.get_or_insert_with(HashMap::new);
+    let ours = landed.get(&at).map(Vec::as_slice).filter(|o| o.len() == size);
+    if back.before.len() != size || !untouched(&tiled, &back.before, ours) {
+        let skipped = TAKEN.fetch_add(1, Ordering::Relaxed) + 1;
+        if skipped.is_power_of_two() {
+            tracing::warn!(
+                skipped,
+                at = format_args!("{at:#x}"),
+                bytes = size,
+                "a texture readback left out: the title wrote its memory after the list was prepared"
+            );
+        }
         return;
     }
     let mut data = std::ptr::null_mut();
@@ -242,6 +290,12 @@ pub(crate) fn land(back: &Back) {
     // SAFETY: mapped above.
     unsafe { back.buffer.Unmap(0, None) };
     crate::host::copy_mapped(at as *mut u8, tiled.as_ptr(), size, true);
+    if landed.len() >= LANDED_MOST && !landed.contains_key(&at) {
+        landed.clear();
+    }
+    if landed.insert(at, tiled).is_none() {
+        tracing::info!(at = format_args!("{at:#x}"), bytes = size, "a texture readback range");
+    }
     let copied = COPIED.fetch_add(1, Ordering::Relaxed) + 1;
     if copied == 1 || copied.is_multiple_of(128) {
         tracing::info!(copied, bytes = size, "texture readback landed");
@@ -269,5 +323,23 @@ mod tests {
         released(93);
         assert!(!far.valid.load(Ordering::Acquire));
         assert!(track(94, 0x2000, 0x3000).valid.load(Ordering::Acquire));
+    }
+
+    /// Memory the title took for something else after the list was prepared
+    /// is not landed on; what our own last landing left there is not someone
+    /// else's write.
+    #[test]
+    fn a_landing_goes_only_where_no_one_else_wrote() {
+        let before = vec![1u8; 64];
+        let mut now = before.clone();
+        assert!(untouched(&now, &before, None));
+        // Our last landing changed the second piece: still ours to land on.
+        now[8..16].fill(7);
+        let ours = now.clone();
+        assert!(untouched(&now, &before, Some(&ours)));
+        assert!(!untouched(&now, &before, None));
+        // The title then zeroed a record in the last piece.
+        now[56..64].fill(0);
+        assert!(!untouched(&now, &before, Some(&ours)));
     }
 }
