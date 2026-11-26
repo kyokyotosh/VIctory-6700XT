@@ -41,6 +41,7 @@ from one PC:
 | | |
 |---|---|
 | In the world, default settings | **8.8-12.6 fps, about 100 ms a frame** (about 45 ms preparing, 40 ms on the card), no device loss in 100+ s |
+| In the world, `-More @{VICTORY_OUTPUT='1920x1080'}` | **12-16 fps, 62-80 ms a frame**, the card about 60% busy and under its budget; the frame is set by preparing (about 60 ms) |
 | Before this fork's changes | the device was lost about 60-90 s in, at the first world load, every run; only `VICTORY_RELAY=0` ran (2.8 fps, 360 ms a frame) |
 | Menus, videos, loading screens | 30 fps |
 | Memory | about 27 GB of private memory; the card about 1 GB over the budget the system cuts to, which it holds |
@@ -51,32 +52,36 @@ What changed, in order, with the runs behind each step:
 ## Milestones
 
 The world's frame rate on [the machine](#the-machine), from the frame-rate line
-the diagnostics build writes every 5 seconds (`N fps, M ms/frame`), counted from
-the first world frame:
+the diagnostics build writes every 5 seconds (`N fps, M ms/frame`, `D draws/frame`);
+a sample is in the world when it draws 1,000 times a frame or more (menus,
+videos and loading screens draw a few dozen):
 
 - **Range N fps**: at least one 5-second sample in the world reaches N fps.
 - **Steady N fps**: at least 90% of the 5-second samples in the world are N fps
   or more, over 90 s or more in the world.
 
 Either one counts only with no device loss, in two runs of the same build and
-settings, and is marked here with the runs and the commit.
+settings, and is marked here with the runs, the settings and the commit.
+`scripts\fps-milestones.ps1 <log> <log>` scores run logs by these rules.
 
 | Target | Range | Steady |
 |---|---|---|
-| 5 fps | **reached** (`b4ad9c9`) | **reached** (`b4ad9c9`: 20 of 21 samples at 5 fps or more in both runs) |
-| 10 fps | **reached** (`b4ad9c9`: 12.6 and 11.1 fps) | not yet (5 of 21 samples at 10 or more) |
-| 15 fps | not yet | not yet |
+| 5 fps | **reached** (`b4ad9c9`, defaults) | **reached** (`b4ad9c9`, defaults: 91% and 95% of samples) |
+| 10 fps | **reached** (`b4ad9c9`, defaults: 12.6 and 11.1 fps) | not yet (defaults 22% and 32%; 1080p output 81% and 76%) |
+| 15 fps | **reached** (`3c5f249`, `VICTORY_OUTPUT=1920x1080`: 16.2 and 16.6 fps) | not yet |
 | 20 fps | not yet | not yet |
 | 25 fps | not yet | not yet |
 | 30 fps | not yet | not yet |
 
-Evidence, default `play.ps1` settings, 1 MiB / 1024 MiB card-buffer limits
-(the `b4ad9c9` defaults), 21 samples each:
+Evidence (`scripts\fps-milestones.ps1`; "defaults" is `scripts\play.ps1` as it is,
+with the 1 MiB / 1024 MiB card-buffer limits of `b4ad9c9`):
 
-| Run | Samples in the world (fps) |
-|---|---|
-| `run-defaults-1024` | 6.4 8.8 7.6 4.6 9.3 9.2 10.7 9.1 8.9 9.8 12.6 10.0 10.5 9.7 6.3 9.5 10.2 8.9 9.8 9.9 9.7 |
-| `run-cards-D` (the same limits; with a card-copy line setting that changed nothing and was not kept) | 7.2 8.4 5.9 8.8 9.4 9.4 10.4 2.5 11.1 10.7 8.8 10.8 10.8 8.9 9.7 10.3 8.9 9.8 10.9 9.2 9.1 |
+| Run | Settings | World samples (fps) |
+|---|---|---|
+| `run-defaults-1024` | defaults | 1.2 6.9 6.4 8.8 7.6 4.6 9.3 9.2 10.7 9.1 8.9 9.8 12.6 10.0 10.5 9.7 6.3 9.5 10.2 8.9 9.8 9.9 9.7 |
+| `run-cards-D` | defaults (with a card-copy line setting that changed nothing and was not kept) | 5.7 7.2 8.4 5.9 8.8 9.4 9.4 10.4 2.5 11.1 10.7 8.8 10.8 10.8 8.9 9.7 10.3 8.9 9.8 10.9 9.2 9.1 |
+| `run-out1080` | defaults + `VICTORY_OUTPUT=1920x1080` | 10.0 5.7 10.4 10.7 11.0 8.9 15.1 13.8 15.0 16.2 12.9 11.6 14.5 14.6 13.2 13.7 13.1 13.3 12.5 9.9 8.3 |
+| `run-out1080-b` | defaults + `VICTORY_OUTPUT=1920x1080` | 10.5 5.5 9.0 6.9 4.3 12.7 16.0 16.3 16.4 16.6 16.3 15.7 6.5 13.6 14.7 14.0 14.4 13.7 12.7 13.4 12.4 |
 
 ## What this fork changed
 
