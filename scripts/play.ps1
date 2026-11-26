@@ -7,6 +7,7 @@
 # -Console      series-x (the default) or series-s: the Series S profile, 1080p output and lighter content,
 #               with the title's own upscaler (its FidelityFX one leaves ghosts here; -More @{VICTORY_UPSCALER='7'} brings it back)
 # -Build        target\diag (the default, the build all measurements are of) or target\release
+# -PadLog       logs a PlayStation pad's reports each time what they say changes (to check its buttons)
 # -More         other settings: -More @{VICTORY_PANEL='1'}
 # Run it from a normal window, not as administrator: the driver then keeps its shader cache elsewhere.
 param(
@@ -17,6 +18,7 @@ param(
     [switch]$OverlayFull,
     [ValidateSet('series-x', 'series-s')][string]$Console = 'series-x',
     [ValidateSet('diag', 'release')][string]$Build = 'diag',
+    [switch]$PadLog,
     [hashtable]$More = @{}
 )
 $settings = @{
@@ -34,6 +36,7 @@ if ($RayTracing) { $settings.VICTORY_BVH_BUILDER = '1' }
 if ($Overlay) { $settings.VICTORY_PANEL = 'fps' }
 if ($OverlayFull) { $settings.VICTORY_PANEL = '1' }
 if ($Console -eq 'series-s') { $settings.VICTORY_UPSCALER = '6' }
+if ($PadLog) { $settings.VICTORY_PS_PADS_RAW = '1' }
 foreach ($k in $More.Keys) { $settings[$k] = $More[$k] }
 
 $victory = Join-Path $PSScriptRoot "..\target\$Build\victory.exe"

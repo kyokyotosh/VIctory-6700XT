@@ -9,7 +9,8 @@
 //! `VICTORY_PS_PADS`: `auto` (the default) reads them only while no XInput
 //! pad is connected, so that the Xbox pad DS4Windows or Steam makes of one
 //! and the pad under it are not both read; `1` always; `0` never.
-//! `VICTORY_PS_PADS_RAW=1` logs each new report's bytes.
+//! `VICTORY_PS_PADS_RAW=1` (`play.ps1 -PadLog`) logs a report's bytes each
+//! time what it says changes (not its counter, which every report moves).
 //!
 //! Cross is A, Circle B, Square X, Triangle Y; L1 and R1 the shoulders; L2 and
 //! R2 the triggers; Create (Share) View; Options Menu; L3 and R3 the sticks'
@@ -306,7 +307,7 @@ fn open(path: Vec<u16>) -> Option<Pad> {
     let spawned = std::thread::Builder::new().name("victory-ps-pad".into()).spawn(move || {
         let handle = handle;
         let mut report = vec![0u8; length];
-        let mut last = Vec::new();
+        let mut last = None;
         loop {
             let mut read = 0;
             // SAFETY: our handle and a buffer of the report's length; a
@@ -315,11 +316,12 @@ fn open(path: Vec<u16>) -> Option<Pad> {
                 break;
             }
             let report = &report[..read as usize];
-            if *RAW && report.get(..12) != last.get(..12) {
-                tracing::info!(bytes = ?&report[..report.len().min(12)], "a PlayStation pad's report");
-                last = report.to_vec();
+            let pad = parse(report, kind);
+            if *RAW && pad != last {
+                tracing::info!(bytes = ?&report[..report.len().min(12)], ?pad, "a PlayStation pad's report");
             }
-            if let Some(pad) = parse(report, kind) {
+            last = pad;
+            if let Some(pad) = pad {
                 *into.lock().unwrap_or_else(|e| e.into_inner()) = Some(pad);
             }
         }

@@ -232,8 +232,8 @@ Steam): Steam turns the pad into mouse and keys for windows that are not its
 games. `VICTORY_PS_PADS`: `auto` (the default) reads a PlayStation pad only
 while no Xbox pad is connected, so DS4Windows' or Steam's Xbox pad and the pad
 under it are not both read; `1` always; `0` never. A pad is logged when it
-connects; `-More @{VICTORY_PS_PADS_RAW='1'}` logs every new report's bytes,
-to check the mapping. With no pad connected the keyboard is one:
+connects; `scripts\play.ps1 -PadLog` logs its reports each time what they say
+changes, to check the mapping. With no pad connected the keyboard is one:
 W/A/S/D and I/J/K/L the sticks, the arrows the D-pad, Enter/Backspace/X/Y the
 A/B/X/Y buttons, Q/E the shoulders, Z/C the triggers, F/H the stick clicks,
 Esc/Tab Menu/View.
