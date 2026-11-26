@@ -7,7 +7,7 @@ Scope: title `D:\kyoto-dump-gta\game.exe` (title ID 7952987A) on this machine, l
 - The host device was removed (`0x887A0005`, then `0x887A0007`) during the first world load, about 60–90 s after start, whenever submissions were sent ahead (`VICTORY_LATE_WAIT` > 0, which `VICTORY_RELAY` turns on).
 - **Cause, from a GPU ETW trace:** the video memory manager runs out of room in a **2 GB aperture segment** (system memory the card maps; segment 2 to `D3DKMTQueryStatistics`, 3 in ETW). It holds the driver's command buffers (1 MB + 64 KB per D3D12 command list, growing with what a list records), our upload scratch chunks and our `D3D12_HEAP_TYPE_CUSTOM` write-back buffers. The next allocation that can only live there cannot be made resident (`ReserveResource` → `0xC0000001`, 46 tries), and the kernel scheduler marks our device as faulted (`VidSchMarkDeviceAsError`, reason 12). No GPU hang, no page fault, no timed-out packet.
 - With send-ahead the host lists climbed from ~830 to ~1,150–1,250 at the world load: `land()` held the newest 64 flights of finished lists (up to 716 lists), and up to 240 title lists were in flight. With every submission waited for (`VICTORY_RELAY=0`) the count stays at 674 and the segment never fills.
-- **Fixed** (commits `f173347`, `018d372`, `e3c0703` and the prelude pool): finished lists go back to the pool at once; preludes are shared from a pool instead of one per host list for life (101 made instead of ~950); and while the segment is above 80% every flight lands as it is sent and idle lists are trimmed. Default `play.ps1` settings now get through the world load: **5.5–7.4 fps (~145 ms/frame) in the world, no device removal in 180 s**, against 2.8 fps with `VICTORY_RELAY=0`. The back-off no longer fires.
+- **Fixed** (commits `f173347`, `018d372`, `e3c0703`, `63a773e`): finished lists go back to the pool at once; preludes are shared from a pool instead of one per host list for life (101 made instead of ~950); and while the segment is above 80% every flight lands as it is sent and idle lists are trimmed. With the 10–12 GB card-buffer limits at 1 MiB / 1024 MiB (from PR #225 by @Zayfway, with its cap lowered for this card), default `play.ps1` settings get through the world load at **8.8–12.6 fps (~100 ms/frame) in the world, no device removal**, against 2.8 fps with `VICTORY_RELAY=0`. The back-off no longer fires.
 
 ## Hardware and system
 
@@ -56,7 +56,18 @@ Release build (`cargo build --release --locked -p victory`), `Play-VIctory.cmd`'
 | with the holding back-off | min 64 KiB, max 1536 MiB | Survives 180 s; **1.2 fps** (796 ms a frame on the GPU): the card's memory 11,679 MB in use against a 10,097 MB budget |
 | with the holding back-off | min 16 MiB, max 512 MiB (the overrides, as before the PR) | Survives 180 s; **4.7 fps** (127 ms on the GPU), 10,077 MB in use against 9,997 MB |
 
-On this card the PR hurts: the system cuts the budget to ~10.0–10.4 GB at the world load, and 1,536 MiB of card buffers put the card 1.6 GB over it, so the video memory manager pages and the card slows five-fold. Not committed to this fork.
+On this card the PR's cap hurts: the system cuts the budget to ~10.0–10.4 GB at the world load, and 1,536 MiB of card buffers put the card 1.6 GB over it, so the video memory manager pages and the card slows five-fold. Its tier is kept with a 1,024 MiB cap and a 1 MiB minimum (see below).
+
+### Card-buffer limits on this card (prelude pool build, default `play.ps1` settings otherwise)
+
+| Limits | Snapshots a frame | Preparing | fps in the world | Card memory in use / budget at the end |
+|---|---|---|---|---|
+| 16 MiB / 512 MiB (before) | 67.5 ms | ~125–140 ms | 5.5–7.4 | 10,347 / 10,085 MB |
+| 1 MiB / 512 MiB | 67.8 ms | 111–148 ms | 5.6–7.0 | 10,339 / 10,146 MB |
+| 1 MiB / 1024 MiB | 2.7–4.0 ms | 28–75 ms | **8.8–12.6** | 11,081 / 10,084 MB |
+| 64 KiB / 1536 MiB (PR #225 as it was) | — | — | 1.2 (796 ms on the card) | 11,679 / 10,097 MB |
+
+The minimum does not matter here (512 MiB is filled by the big copies either way); the cap does. A copy is made up to 97% of the budget at the moment, and the copies come in a burst right before the system cuts the budget, so the card ends over the cut budget by about the copies' bytes; at 1 GB that still holds steady (18–72 ms a frame on the card), at 1.5 GB it pages. Making copies only up to 88% of the budget changed nothing (the burst comes while the card is far below it), so that was not kept.
 
 ## GPU ETW trace (`wpr -start GPU -filemode`, default settings)
 
@@ -131,7 +142,7 @@ These are real bugs but not the trigger (they appear with relay 0, which survive
 
 ## Next steps
 
-1. Frame rate: the frame is now ~125 ms of preparing on the submitting thread and the card is barely waited for. Next is the CPU side of a submission (copies ~20–40 ms, the rest in steps and refreshes).
+1. Frame rate: at ~100 ms a frame, ~45 ms preparing, ~40 ms on the card and ~35–45 ms landing on the relay thread. Next: the card time (the card's memory is ~1 GB over the cut budget) and the landing.
 2. The card's memory runs slightly over the cut budget late in runs (10,077 / 9,997 MB); keep an eye on the GPU time if it creeps up.
 3. Fix the id 646 / id 538 validation errors separately.
 
