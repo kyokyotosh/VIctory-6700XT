@@ -140,9 +140,33 @@ These are real bugs but not the trigger (they appear with relay 0, which survive
 - id 538: `SetComputeRootShaderResourceView` on a buffer in `COPY_DEST` (promoted from COMMON): resource `title buffer 0xdb790df00+0x17ebf00 on the card` (222 times; only with relay 0).
 - id 971: a pipeline library load for a name that is not stored (2 times).
 
+## 1080p output and the 7900 XTX fork's renderer patches
+
+`VICTORY_OUTPUT=1920x1080` (the title renders 1080p in the Series X profile), default settings otherwise:
+
+| Run | World samples (fps, `scripts\fps-milestones.ps1`) | Card memory in use / budget |
+|---|---|---|
+| `run-out1080` | 10.0 5.7 10.4 10.7 11.0 8.9 15.1 13.8 15.0 16.2 12.9 11.6 14.5 14.6 13.2 13.7 13.1 13.3 12.5 9.9 8.3 | 8,967 / 10,191 MB |
+| `run-out1080-b` | 10.5 5.5 9.0 6.9 4.3 12.7 16.0 16.3 16.4 16.6 16.3 15.7 6.5 13.6 14.7 14.0 14.4 13.7 12.7 13.4 12.4 | 9,315 / 10,175 MB |
+
+The card is under its budget and about 57–67% busy; the frame (62–80 ms) is set by preparing on the submitting thread (~60 ms: refreshes 24, waiting for the heaps' records 13, title bytes under flights 9, card copies 7, the write watch 6). Range 15 met; steady 10 not (81% and 76% of samples).
+
+The renderer patches (off by default), each alone at 1080p, 150 s:
+
+| Switch | Result |
+|---|---|
+| all five together | the title stopped on an access violation in its own code (read of 0x2c at image+0x164a298) before the world |
+| `VICTORY_PORT_GUARD=1` | **the title stops on its own `int3`** (0x80000003 at image+0x1e6c29f) before the world: the one that breaks the five |
+| `VICTORY_PORT_CBV=1` | runs, 1–3 fps in the world |
+| `VICTORY_PORT_CONSTANTS=1` | runs, 0.4–16 fps over 50 s of world: no clear change |
+| `VICTORY_PORT_DESCRIPTORS=1` | runs, 7–16 fps over 55 s: no clear change |
+| `VICTORY_PORT_JOURNAL=1` | runs, 5–15.5 fps over 70 s: no clear change |
+
+They stay off here.
+
 ## Next steps
 
-1. Frame rate: at ~100 ms a frame, ~45 ms preparing, ~40 ms on the card and ~35–45 ms landing on the relay thread. Next: the card time (the card's memory is ~1 GB over the cut budget) and the landing.
+1. Frame rate: at 1080p output the submitting thread's preparing (~60 ms) sets the frame; at native output (~100 ms a frame) the card (~80 ms of work, ~1 GB over the cut budget). Next: the refreshes and the wait for the heaps' records on the submitting thread.
 2. The card's memory runs slightly over the cut budget late in runs (10,077 / 9,997 MB); keep an eye on the GPU time if it creeps up.
 3. Fix the id 646 / id 538 validation errors separately.
 
