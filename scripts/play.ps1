@@ -4,7 +4,8 @@
 # -RayTracing   the title's own ray-traced indirect light: lit interiors, about a third slower
 # -Overlay      FPS, ms a frame, draws a frame and a line chart of the last frames' rates in the upper left (F3 hides and shows it)
 # -OverlayFull  the same with the submitting thread's, the card's and memory's numbers
-# -Console      series-x (the default) or series-s: the Series S profile, 1080p output and lighter content
+# -Console      series-x (the default) or series-s: the Series S profile, 1080p output and lighter content,
+#               with the title's own upscaler (its FidelityFX one leaves ghosts here; -More @{VICTORY_UPSCALER='7'} brings it back)
 # -Build        target\diag (the default, the build all measurements are of) or target\release
 # -More         other settings: -More @{VICTORY_PANEL='1'}
 # Run it from a normal window, not as administrator: the driver then keeps its shader cache elsewhere.
@@ -32,6 +33,7 @@ if ($Safe) {
 if ($RayTracing) { $settings.VICTORY_BVH_BUILDER = '1' }
 if ($Overlay) { $settings.VICTORY_PANEL = 'fps' }
 if ($OverlayFull) { $settings.VICTORY_PANEL = '1' }
+if ($Console -eq 'series-s') { $settings.VICTORY_UPSCALER = '6' }
 foreach ($k in $More.Keys) { $settings[$k] = $More[$k] }
 
 $victory = Join-Path $PSScriptRoot "..\target\$Build\victory.exe"
