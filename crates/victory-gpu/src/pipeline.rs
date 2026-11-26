@@ -103,6 +103,26 @@ pub(crate) fn kept() -> [u64; 7] {
     ]
 }
 
+/// The program's name in its container, as the title's tools wrote it
+/// (`CS_ScreenProbes_TemporalResolve_a911b49c_Wrapped`): the first
+/// identifier that starts with a stage's two letters and `_`.
+#[cfg(feature = "diagnostics")]
+fn program_name(bytes: &[u8]) -> Option<&str> {
+    let word = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    (1..bytes.len().saturating_sub(8)).find_map(|i| {
+        let at = &bytes[i..];
+        let starts = matches!(at[0], b'C' | b'P' | b'V' | b'M' | b'A' | b'H' | b'D' | b'G')
+            && at[1] == b'S'
+            && at[2] == b'_'
+            && !word(bytes[i - 1]);
+        if !starts {
+            return None;
+        }
+        let len = at.iter().take_while(|&&b| word(b)).count();
+        (len >= 8).then(|| std::str::from_utf8(&at[..len]).ok()).flatten()
+    })
+}
+
 /// The shared container for `bytes`.
 fn shader(stage: &'static str, bytes: &[u8]) -> Arc<Shader> {
     let full = blake3::hash(bytes);
@@ -113,6 +133,11 @@ fn shader(stage: &'static str, bytes: &[u8]) -> Arc<Shader> {
         .or_insert_with(|| {
             KEPT[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             KEPT[1].fetch_add(bytes.len() as u64, std::sync::atomic::Ordering::Relaxed);
+            // (Compute programs only: the passes traced by name are.)
+            #[cfg(feature = "diagnostics")]
+            if stage == "compute" {
+                tracing::info!(hash = &full.to_hex()[..16], name = program_name(bytes), "compute program");
+            }
             Arc::new(Shader {
                 stage,
                 hash: full.to_hex()[..16].to_owned(),

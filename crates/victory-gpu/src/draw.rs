@@ -4577,12 +4577,17 @@ fn describe(view: Option<&View>) -> String {
             format!("{}x{} f{} flags {:#x} of {r:?}", d.Width, d.Height, d.Format.0, d.Flags.0)
         })
     };
+    // The title's description's first words (format, dimension, then the
+    // first level or element and its count): two slots of one resource may
+    // be two levels of it.
+    let words = |d: &Option<[u32; 10]>| d.map_or("own".to_owned(), |d| format!("{:?}", &d[..5]));
     match view {
         None => "no view".into(),
-        Some(v @ View::Shader(r, _)) => texture(*r as This)
+        Some(v @ View::Shader(r, d)) => texture(*r as This)
+            .map(|t| format!("{t} view {}", words(d)))
             .unwrap_or_else(|| format!("buffer {:?}", crate::descriptor::host::buffer_range(v))),
-        Some(v @ View::Unordered(r, ..)) => match texture(*r as This) {
-            Some(t) => format!("uav texture {t}"),
+        Some(v @ View::Unordered(r, _, d)) => match texture(*r as This) {
+            Some(t) => format!("uav texture {t} view {}", words(d)),
             None => format!(
                 "uav resource {r:#x} buffer {:?}",
                 crate::descriptor::host::buffer_range(v)
