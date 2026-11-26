@@ -2,7 +2,7 @@
 #   scripts\play.ps1 -Exe <path of your own copy's executable>
 # -Safe         without the newer, faster ways (the first thing to try when something is wrong)
 # -RayTracing   the title's own ray-traced indirect light: lit interiors, about a third slower
-# -Overlay      FPS, ms a frame, draws a frame and a graph of the last frames' times in the upper left (F3 hides and shows it)
+# -Overlay      FPS, ms a frame, draws a frame and a line chart of the last frames' rates in the upper left (F3 hides and shows it)
 # -OverlayFull  the same with the submitting thread's, the card's and memory's numbers
 # -Build        target\diag (the default, the build all measurements are of) or target\release
 # -More         other settings: -More @{VICTORY_PANEL='1'}

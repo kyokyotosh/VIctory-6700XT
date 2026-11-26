@@ -189,9 +189,10 @@ scripts\play.ps1 -Exe <path of your copy's executable>
 
 `scripts\play.ps1 -Safe` leaves out the newest, faster ways; try it first when
 something is wrong. `-RayTracing` turns the title's ray-traced indirect light on.
-`-Overlay` shows FPS, ms a frame, draws a frame and a graph of the last 240
-frames' times (guide lines at 30 and 10 fps) in the upper left corner; F3 hides
-and shows it. `-OverlayFull` adds the submitting thread's, the card's and the
+`-Overlay` shows FPS, ms a frame, draws a frame and a line chart of the last
+240 frames' rates (0-40 fps, red where the rate fell, green where it rose, a
+dotted baseline at 30 fps) with their lowest and highest, in the upper left
+corner; F3 hides and shows it. `-OverlayFull` adds the submitting thread's, the card's and the
 memory's numbers. `-More @{VICTORY_OUTPUT='1920x1080'}` has the title render at
 1080p, which on this card runs 12-16 fps instead of 9-12 (see
 [Milestones](#milestones)).

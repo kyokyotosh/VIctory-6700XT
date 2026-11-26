@@ -2,13 +2,14 @@
 //! default; F3 shows and hides it while our window has the focus): white
 //! text on a black box in the upper left corner of what is shown, so that a
 //! screenshot carries them, with what it costs itself on the submitting
-//! thread, and under the text a graph of the last frames' times.
-//! `VICTORY_PANEL=fps` shows the frame rate, a frame's time, draws and the
-//! graph alone (`scripts\play.ps1 -Overlay`). Made again twice a second from
-//! the counters of the frame-rate line, memory and textures; a frame itself
-//! only copies the box out of a buffer in the card's memory. Copied onto the
-//! swap chain's buffer, behind the title's picture: saved frames and the
-//! frame recorder see the title's own.
+//! thread, and under the text a line chart of the last frames' rates (red
+//! where the rate fell, green where it rose, a baseline at 30 fps) with their
+//! lowest and highest. `VICTORY_PANEL=fps` shows the frame rate, a frame's
+//! time, draws and the chart alone (`scripts\play.ps1 -Overlay`). Made again
+//! twice a second from the counters of the frame-rate line, memory and
+//! textures; a frame itself only copies the box out of a buffer in the card's
+//! memory. Copied onto the swap chain's buffer, behind the title's picture:
+//! saved frames and the frame recorder see the title's own.
 
 use std::collections::VecDeque;
 use std::sync::{LazyLock, OnceLock};
@@ -36,11 +37,17 @@ const RIM: u32 = 3;
 /// Dots between the text and the graph, and the graph's height in dots.
 const GAP: u32 = 3;
 const GRAPH: u32 = 40;
-/// A frame's time at the graph's top, and its guide lines (30 and 10 fps).
-const GRAPH_MS: f32 = 125.0;
-const GUIDES_MS: [f32; 2] = [1000.0 / 30.0, 100.0];
+/// The frame rate at the graph's top, and its baseline.
+const GRAPH_FPS: f32 = 40.0;
+const BASELINE_FPS: f32 = 30.0;
 /// Frames the graph shows, one dot wide each, the newest on the right.
 const GRAPH_FRAMES: usize = (COLUMNS * CELL.0) as usize;
+
+/// The colours of the box's dots, as [`colours`] gives them.
+const BLACK: u8 = 0;
+const WHITE: u8 = 1;
+const RED: u8 = 2;
+const GREEN: u8 = 3;
 
 /// The texts are put into one of these in turn: the card reads the others,
 /// at most half a second old.
@@ -142,59 +149,84 @@ fn scale(height: u32) -> u32 {
     (height / 540).max(1)
 }
 
-/// Whether a dot of the picture of `lines` and `graph` (frame times in ms,
-/// the newest last) is white.
-fn lit(lines: &[String], graph: &[f32], x: u32, y: u32) -> bool {
+/// The colour of a dot of the picture of `lines` and `graph` (frame times in
+/// ms, the newest last).
+fn lit(lines: &[String], graph: &[f32], x: u32, y: u32) -> u8 {
     let (Some(x), Some(y)) = (x.checked_sub(RIM), y.checked_sub(RIM)) else {
-        return false;
+        return BLACK;
     };
     let top = lines_shown() * CELL.1 + GAP;
     if y >= top {
-        return graph_lit(graph, x, y - top);
+        return graph_dot(graph, x, y - top);
     }
     if x % CELL.0 >= GLYPH.0 || y % CELL.1 >= GLYPH.1 || x / CELL.0 >= COLUMNS {
-        return false;
+        return BLACK;
     }
     let Some(&c) = lines.get((y / CELL.1) as usize).and_then(|l| l.as_bytes().get((x / CELL.0) as usize)) else {
-        return false;
+        return BLACK;
     };
-    (glyph(c.to_ascii_uppercase())[(y % CELL.1) as usize] >> (GLYPH.0 - 1 - x % CELL.0)) & 1 != 0
+    if (glyph(c.to_ascii_uppercase())[(y % CELL.1) as usize] >> (GLYPH.0 - 1 - x % CELL.0)) & 1 != 0 { WHITE } else { BLACK }
 }
 
-/// Whether a dot of the graph is white: a bar for each frame, as tall as the
-/// frame took (up to [`GRAPH_MS`]), the newest on the right; the guide lines
-/// run across dotted, dark where they cross a bar.
-fn graph_lit(graph: &[f32], x: u32, y: u32) -> bool {
+/// The graph's row, from its foot, of a frame that took `ms`.
+fn row(ms: f32) -> u32 {
+    let fps = 1e3 / ms.max(0.001);
+    ((fps.min(GRAPH_FPS) / GRAPH_FPS) * (GRAPH - 1) as f32).round() as u32
+}
+
+/// The colour of a dot of the graph: the frames' rates as a line from 0 to
+/// [`GRAPH_FPS`], the newest on the right. Each frame's column joins its rate
+/// to the frame before's, red where the rate fell and green where it rose;
+/// the baseline at [`BASELINE_FPS`] runs across dotted.
+fn graph_dot(graph: &[f32], x: u32, y: u32) -> u8 {
     if y >= GRAPH || x as usize >= GRAPH_FRAMES {
-        return false;
+        return BLACK;
     }
-    let from_bottom = (GRAPH - 1 - y) as f32;
-    let dot_ms = GRAPH_MS / GRAPH as f32;
-    let shown = &graph[graph.len().saturating_sub(GRAPH_FRAMES)..];
-    let bar = (x as usize)
-        .checked_sub(GRAPH_FRAMES - shown.len())
-        .and_then(|i| shown.get(i))
-        .is_some_and(|&ms| from_bottom * dot_ms < ms);
-    let guide = x.is_multiple_of(2) && GUIDES_MS.iter().any(|&ms| (ms / dot_ms).floor() == from_bottom);
-    bar != guide
+    let from_bottom = GRAPH - 1 - y;
+    if let Some(k) = (graph.len() + x as usize).checked_sub(GRAPH_FRAMES) {
+        let (now, before) = (graph[k], graph[k.saturating_sub(1)]);
+        let (a, b) = (row(now), row(before));
+        if (a.min(b)..=a.max(b)).contains(&from_bottom) {
+            return if now < before {
+                GREEN
+            } else if now > before {
+                RED
+            } else {
+                WHITE
+            };
+        }
+    }
+    if x.is_multiple_of(2) && from_bottom == row(1e3 / BASELINE_FPS) { WHITE } else { BLACK }
 }
 
-/// The bytes of a black and a white pixel of a swap chain's format.
-fn colours(format: DXGI_FORMAT) -> Option<[&'static [u8]; 2]> {
+/// `[r, g, b]` of 10 bits each, with an opaque alpha, as a pixel of
+/// `DXGI_FORMAT_R10G10B10A2_UNORM`.
+const fn rgb10(r: u32, g: u32, b: u32) -> [u8; 4] {
+    (r | g << 10 | b << 20 | 3 << 30).to_le_bytes()
+}
+const RED10: [u8; 4] = rgb10(1023, 200, 200);
+const GREEN10: [u8; 4] = rgb10(200, 1023, 200);
+
+/// The bytes of a black, a white, a red and a green pixel of a swap chain's
+/// format ([`BLACK`], [`WHITE`], [`RED`], [`GREEN`]).
+fn colours(format: DXGI_FORMAT) -> Option<[&'static [u8]; 4]> {
     Some(match format {
-        DXGI_FORMAT_R8G8B8A8_UNORM | DXGI_FORMAT_B8G8R8A8_UNORM => [&[0, 0, 0, 0xFF], &[0xFF; 4]],
-        DXGI_FORMAT_R10G10B10A2_UNORM => [&[0, 0, 0, 0xC0], &[0xFF; 4]],
-        // Halves of 0 and 1.
+        DXGI_FORMAT_R8G8B8A8_UNORM => [&[0, 0, 0, 0xFF], &[0xFF; 4], &[0xFF, 0x33, 0x33, 0xFF], &[0x33, 0xFF, 0x33, 0xFF]],
+        DXGI_FORMAT_B8G8R8A8_UNORM => [&[0, 0, 0, 0xFF], &[0xFF; 4], &[0x33, 0x33, 0xFF, 0xFF], &[0x33, 0xFF, 0x33, 0xFF]],
+        DXGI_FORMAT_R10G10B10A2_UNORM => [&[0, 0, 0, 0xC0], &[0xFF; 4], &RED10, &GREEN10],
+        // Halves of 0, 0.2 and 1.
         DXGI_FORMAT_R16G16B16A16_FLOAT => [
             &[0, 0, 0, 0, 0, 0, 0, 0x3C],
             &[0, 0x3C, 0, 0x3C, 0, 0x3C, 0, 0x3C],
+            &[0, 0x3C, 0x66, 0x32, 0x66, 0x32, 0, 0x3C],
+            &[0x66, 0x32, 0, 0x3C, 0x66, 0x32, 0, 0x3C],
         ],
         _ => return None,
     })
 }
 
 /// The box as rows of `pitch` bytes.
-fn painted(lines: &[String], graph: &[f32], scale: u32, colours: [&[u8]; 2], pitch: usize) -> Vec<u8> {
+fn painted(lines: &[String], graph: &[f32], scale: u32, colours: [&[u8]; 4], pitch: usize) -> Vec<u8> {
     let (width, height) = size(scale);
     let bytes = colours[0].len();
     let mut out = vec![0; pitch * height as usize];
@@ -253,14 +285,15 @@ impl Counters {
 }
 
 /// The text. `c`: [`Counters`] per frame, `ms` a frame's time, `worst` the
-/// longest frame's, `cost` what this takes of a frame, in microseconds.
-fn text(c: &[f64; COUNTERS], ms: f64, worst: f64, cost: f64, host: &Host) -> Vec<String> {
+/// longest frame's, `cost` what this takes of a frame, in microseconds,
+/// `range` the lowest and highest frame rate of the frames the graph shows.
+fn text(c: &[f64; COUNTERS], ms: f64, worst: f64, cost: f64, range: (f32, f32), host: &Host) -> Vec<String> {
     let gb = |bytes: u64| bytes as f64 / (1u64 << 30) as f64;
     let (working, private) = crate::copystat::process_memory();
     let [budget, used, _, shared] = host.video_memory().unwrap_or_default();
     let idle = (c[1] / 1e3).min(ms);
     let fps = 1e3 / ms.max(0.001);
-    let guide = format!("GRAPH 0-{GRAPH_MS:.0} MS  LINES AT 30 AND 10 FPS");
+    let guide = format!("MIN {:.1}  MAX {:.1} FPS  BASE {BASELINE_FPS:.0}", range.0, range.1);
     if compact() {
         return vec![
             format!("FPS {fps:.1}  MS/FRAME {ms:.1}"),
@@ -411,8 +444,13 @@ impl Panel {
         let c = counters.since(self.before, frames);
         self.before = counters;
         let cost = self.cost.as_secs_f64() * 1e6 / frames;
-        self.lines = text(&c, elapsed.as_secs_f64() * 1e3 / frames, self.worst, cost, host);
         self.graph = self.times.iter().copied().collect();
+        let range = self.graph.iter().fold((f32::MAX, 0.0f32), |(low, high), &ms| {
+            let fps = 1e3 / ms.max(0.001);
+            (low.min(fps), high.max(fps))
+        });
+        let range = if self.graph.is_empty() { (0.0, 0.0) } else { range };
+        self.lines = text(&c, elapsed.as_secs_f64() * 1e3 / frames, self.worst, cost, range, host);
         self.changed = true;
         (self.since, self.frames, self.worst) = (now, 0, 0.0);
         self.cost = now.elapsed();
@@ -542,18 +580,20 @@ mod tests {
         assert_eq!((c[0], c[1]), (2.0, 2.0));
     }
 
-    /// A frame at the graph's top fills its column, one half as long half
-    /// of it; the guide lines show dotted where no bar is.
+    /// Each frame's column joins its rate to the frame before's, red where it
+    /// fell and green where it rose; the baseline runs dotted where no line is.
     #[test]
-    fn frames_are_bars() {
-        let graph = vec![GRAPH_MS / 2.0, GRAPH_MS];
+    fn frames_are_a_line() {
+        // 10, 40 and 20 fps.
+        let graph = vec![100.0, 25.0, 50.0];
         let last = GRAPH_FRAMES as u32 - 1;
-        assert!(graph_lit(&graph, last, 0), "the top of the full bar");
-        assert!(graph_lit(&graph, last - 1, GRAPH - 1), "the foot of the half bar");
-        assert!(!graph_lit(&graph, last - 1, 0), "above the half bar");
-        assert!(!graph_lit(&graph, last - 2, GRAPH - 1), "no frame there yet");
-        let row_100 = GRAPH - 1 - (100.0 / (GRAPH_MS / GRAPH as f32)).floor() as u32;
-        assert!(graph_lit(&graph, 0, row_100), "the 10 fps line where no bar is");
-        assert!(!graph_lit(&graph, 1, row_100), "dotted");
+        let y = |fps: f32| GRAPH - 1 - row(1e3 / fps);
+        assert_eq!(graph_dot(&graph, last - 1, y(10.0)), GREEN, "10 to 40, from its foot");
+        assert_eq!(graph_dot(&graph, last - 1, y(40.0)), GREEN, "to its top");
+        assert_eq!(graph_dot(&graph, last, y(40.0)), RED, "40 to 20, from its top");
+        assert_eq!(graph_dot(&graph, last, y(20.0)), RED, "to its foot");
+        assert_eq!(graph_dot(&graph, last, y(10.0)), BLACK, "nothing below");
+        assert_eq!(graph_dot(&graph, 0, y(BASELINE_FPS)), WHITE, "the baseline where no frame is");
+        assert_eq!(graph_dot(&graph, 1, y(BASELINE_FPS)), BLACK, "dotted");
     }
 }
