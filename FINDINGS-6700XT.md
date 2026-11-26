@@ -7,7 +7,7 @@ Scope: title `D:\kyoto-dump-gta\game.exe` (title ID 7952987A) on this machine, l
 - The host device was removed (`0x887A0005`, then `0x887A0007`) during the first world load, about 60–90 s after start, whenever submissions were sent ahead (`VICTORY_LATE_WAIT` > 0, which `VICTORY_RELAY` turns on).
 - **Cause, from a GPU ETW trace:** the video memory manager runs out of room in a **2 GB aperture segment** (system memory the card maps; segment 2 to `D3DKMTQueryStatistics`, 3 in ETW). It holds the driver's command buffers (1 MB + 64 KB per D3D12 command list, growing with what a list records), our upload scratch chunks and our `D3D12_HEAP_TYPE_CUSTOM` write-back buffers. The next allocation that can only live there cannot be made resident (`ReserveResource` → `0xC0000001`, 46 tries), and the kernel scheduler marks our device as faulted (`VidSchMarkDeviceAsError`, reason 12). No GPU hang, no page fault, no timed-out packet.
 - With send-ahead the host lists climbed from ~830 to ~1,150–1,250 at the world load: `land()` held the newest 64 flights of finished lists (up to 716 lists), and up to 240 title lists were in flight. With every submission waited for (`VICTORY_RELAY=0`) the count stays at 674 and the segment never fills.
-- **Fixed** (commits `f173347`, `018d372` and the back-off that holds): finished lists go back to the pool at once, and while the segment is above 80% every flight lands as it is sent and the idle pool is trimmed to 64 lists. Default `play.ps1` settings now get through the world load: **4.5–4.7 fps (212 ms/frame) in the world, no device removal in 180 s**, against 2.8 fps with `VICTORY_RELAY=0`.
+- **Fixed** (commits `f173347`, `018d372`, `e3c0703` and the prelude pool): finished lists go back to the pool at once; preludes are shared from a pool instead of one per host list for life (101 made instead of ~950); and while the segment is above 80% every flight lands as it is sent and idle lists are trimmed. Default `play.ps1` settings now get through the world load: **5.5–7.4 fps (~145 ms/frame) in the world, no device removal in 180 s**, against 2.8 fps with `VICTORY_RELAY=0`. The back-off no longer fires.
 
 ## Hardware and system
 
@@ -89,7 +89,8 @@ Where the host lists are (a temporary log at each 25th new host list, default se
 | before, `VICTORY_BURY_LAG=8` | 14:50:45 | 14:51:29 | 1,256 (180 title lists in flight) | 0.6–30 |
 | landed lists given back at once (`land()` → `list::recycle_landed`, what they held kept through `retire`) | 14:54:49 | 14:55:15 | 1,235 (224 in flight) | 3.7–30 |
 | + back-off on a full aperture segment (`host/segments.rs`, `018d372`) | 15:00:25 | 15:01:13 | 1,208 (239 in flight) | 6.7–30 |
-| + back-off on every send, all flights land while tight, idle pool trimmed to 64, on at 80% / off at 70% | 15:18:59 | — (180 s) | 1,052 | **4.5–4.7 steady** (with PR #225 card limits: 1.2) |
+| + back-off on every send, all flights land while tight, idle pool trimmed to 64, on at 80% / off at 70% (`e3c0703`) | 15:18:59 | — (180 s) | 1,052 | **4.5–4.7 steady** (with PR #225 card limits: 1.2) |
+| + preludes from a pool (taken at submission, given back at the list's reset; 128 kept idle, 16 while tight) | 15:46:55 | — (180 s) | 1,218; **101 preludes** made (was ~950) | **5.5–7.4** (~145 ms/frame: ~125 ms preparing, the card waited for ~0); the back-off never fired |
 
 Segments as the graphics kernel reports them on this PC (`D3DKMTQueryStatistics`, logged at the start):
 
@@ -130,7 +131,7 @@ These are real bugs but not the trigger (they appear with relay 0, which survive
 
 ## Next steps
 
-1. Frame rate: with the segment above 80% the back-off stays on and every flight lands as it is sent; the frame is ~83 ms preparing and ~127 ms on the card. Fewer host lists alive (their command memory) would let send-ahead run freely: the title's own ~650 lists each hold a host list and its allocator's high-water command memory.
+1. Frame rate: the frame is now ~125 ms of preparing on the submitting thread and the card is barely waited for. Next is the CPU side of a submission (copies ~20–40 ms, the rest in steps and refreshes).
 2. The card's memory runs slightly over the cut budget late in runs (10,077 / 9,997 MB); keep an eye on the GPU time if it creeps up.
 3. Fix the id 646 / id 538 validation errors separately.
 
