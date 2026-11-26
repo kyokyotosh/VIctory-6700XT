@@ -1,43 +1,120 @@
-# VIctory on an RX 7900 XTX
+# VIctory on an RX 6700 XT
 
-A fork of [VIctory](https://github.com/Marvisak/VIctory), a compatibility layer
-that runs an Xbox Series title natively on Windows from files the user supplies.
+A fork of [avatarmanz/VIctory-7900XTX](https://github.com/avatarmanz/VIctory-7900XTX),
+itself a fork of [VIctory](https://github.com/Marvisak/VIctory), a compatibility
+layer that runs an Xbox Series title natively on Windows from files the user
+supplies. The 7900 XTX fork is avatarmanz's work and holds almost everything
+here; this fork takes it to a 12 GB card in a 32 GB PC.
 
 ## The goal
 
-**A stable 30 fps or more without ray tracing, then as high a frame rate and as
-low frame times as the PC allows**, on an AMD RX 7900 XTX first and on PCs with
-32 GB (later 16 GB) of RAM.
+**Make the title playable on an AMD RX 6700 XT (12 GB) with 32 GB of RAM**: first
+no device losses, then a steady frame rate, step by step up to 30 fps (see
+[Milestones](#milestones)). Ray tracing stays off.
 
-The way there is **porting, not emulating**: patching the title's renderer so it
-behaves the way a PC renderer does, rather than having the layer watch and copy
-the console's shared memory every frame. Shaders are translated ahead of time
-into a versioned store that is kept between builds. Ray tracing stays optional
-and off by default. The picture comes after the frame rate: texture pop-in and
-lighting that is too bright or too dark when walking indoors are next in line.
+The way there is the 7900 XTX fork's: **porting, not emulating**, patching the
+title's renderer so it behaves the way a PC renderer does rather than having
+the layer watch and copy the console's shared memory every frame. On top of
+that, this fork fits the layer into what a 12 GB card and a 32 GB PC give it.
 
 **This repository contains no game files, code or assets.** You need your own
 copy of the game. It is not affiliated with or endorsed by the game's developer
 or publisher.
 
-## Where it stands (2026-11-26)
+## The machine
 
-Tested on one machine only: Windows 11, Intel i9-12900K, 64 GB RAM, Radeon
-RX 7900 XTX, ray tracing off.
+Every number in this README and in [FINDINGS-6700XT.md](FINDINGS-6700XT.md) comes
+from one PC:
 
 | | |
 |---|---|
-| City street, Series S profile, renderer patches 1, 2, 5, 6 and 7 on | about 45 ms a frame (about 22 fps, 44.9 ms in run merge-5) |
-| Same, patches 1, 2, 5 and 6 | 45.6 ms, p95 47 ms |
-| Same, patches 1, 2 and 5 | 47.3 ms (about 21 fps), p95 49 ms |
-| Series X profile, patches 1+2 | about 53 ms (about 19 fps) |
-| Same scene before the patches | 57-75 ms (13-17 fps) |
-| Shaders the title uses that translate | all of them (25,790 of 25,985; the rest are unused geometry shaders) |
-| Memory | about 30 GB of private memory, 10.5 GB of VRAM: **64 GB of RAM recommended** for now |
+| OS | Windows 11 Pro (build 26300) |
+| CPU | AMD Ryzen 7 5800X3D (8 cores, 16 threads) |
+| RAM | 32 GB |
+| GPU | AMD Radeon RX 6700 XT, 12 GB (WDDM budget 11,475 MB, cut to about 10,080 MB at the first world load) |
+| Driver | 32.0.21045.29003 (2026-11-17) |
+| Display | 2560x1440 |
+| Settings | `scripts\play.ps1` defaults (Series X profile, ray tracing off), diagnostics build |
 
-It started at 280 ms a frame in the same scenes three days earlier. What sets
-the frame now is the one thread that submits the title's work to the card
-(about 40 ms); the card itself needs about 36 ms and now waits about 7 ms a frame with nothing queued.
+## Where it stands (2026-11-26)
+
+| | |
+|---|---|
+| In the world, default settings | **8.8-12.6 fps, about 100 ms a frame** (about 45 ms preparing, 40 ms on the card), no device loss in 100+ s |
+| Before this fork's changes | the device was lost about 60-90 s in, at the first world load, every run; only `VICTORY_RELAY=0` ran (2.8 fps, 360 ms a frame) |
+| Menus, videos, loading screens | 30 fps |
+| Memory | about 27 GB of private memory; the card about 1 GB over the budget the system cuts to, which it holds |
+
+What changed, in order, with the runs behind each step:
+[FINDINGS-6700XT.md](FINDINGS-6700XT.md).
+
+## Milestones
+
+The world's frame rate on [the machine](#the-machine), from the frame-rate line
+the diagnostics build writes every 5 seconds (`N fps, M ms/frame`), counted from
+the first world frame:
+
+- **Range N fps**: at least one 5-second sample in the world reaches N fps.
+- **Steady N fps**: at least 90% of the 5-second samples in the world are N fps
+  or more, over 90 s or more in the world.
+
+Either one counts only with no device loss, in two runs of the same build and
+settings, and is marked here with the runs and the commit.
+
+| Target | Range | Steady |
+|---|---|---|
+| 5 fps | **reached** (`b4ad9c9`) | **reached** (`b4ad9c9`: 20 of 21 samples at 5 fps or more in both runs) |
+| 10 fps | **reached** (`b4ad9c9`: 12.6 and 11.1 fps) | not yet (5 of 21 samples at 10 or more) |
+| 15 fps | not yet | not yet |
+| 20 fps | not yet | not yet |
+| 25 fps | not yet | not yet |
+| 30 fps | not yet | not yet |
+
+Evidence, default `play.ps1` settings, 1 MiB / 1024 MiB card-buffer limits
+(the `b4ad9c9` defaults), 21 samples each:
+
+| Run | Samples in the world (fps) |
+|---|---|
+| `run-defaults-1024` | 6.4 8.8 7.6 4.6 9.3 9.2 10.7 9.1 8.9 9.8 12.6 10.0 10.5 9.7 6.3 9.5 10.2 8.9 9.8 9.9 9.7 |
+| `run-cards-D` (the same limits; with a card-copy line setting that changed nothing and was not kept) | 7.2 8.4 5.9 8.8 9.4 9.4 10.4 2.5 11.1 10.7 8.8 10.8 10.8 8.9 9.7 10.3 8.9 9.8 10.9 9.2 9.1 |
+
+## What this fork changed
+
+In short; the reasons, the GPU trace and the measurements are in
+[FINDINGS-6700XT.md](FINDINGS-6700XT.md).
+
+- **The device loss at the first world load.** A GPU ETW trace showed the video
+  memory manager running out of room in a 2 GB aperture segment (system memory
+  the card maps) that holds the driver's command buffers, upload heaps and
+  CPU-cached buffers; it then marked the device as faulted. With submissions
+  sent ahead the layer held some 1,200 host command lists at once there.
+  - Lists whose flight has landed go back to the pool at once; what they named
+    still waits the bury lag (`f173347`).
+  - The adapter's segments are read with `D3DKMTQueryStatistics`, logged at the
+    start, and while an aperture segment is above 80% of its limit every flight
+    lands as it is sent and idle lists are trimmed (`VICTORY_SEGMENT_TIGHT`;
+    `018d372`, `e3c0703`).
+  - Preludes come from a pool instead of one per list for its life: 101 made
+    instead of about 950 (`63a773e`).
+- **Card-buffer limits for 10-12 GB cards**: 1 MiB and up, 1024 MiB, from
+  [PR #225](https://github.com/avatarmanz/VIctory-7900XTX/pull/225) by @Zayfway
+  with its cap lowered for this card (`b4ad9c9`). The CPU looked for shader
+  writes in 400 MB a frame of copies left in the PC's memory (67 ms); now 3 ms.
+
+What is known to be wrong here:
+
+- The card's memory ends about 1 GB over the budget the system cuts to at the
+  world load (the card copies come in a burst just before the cut).
+- Two debug-layer errors repeat in every run (a UAV descriptor in an SRV range,
+  and a buffer read in the copy-destination state); not the cause of anything
+  seen yet.
+- The 7900 XTX fork's list below holds here too.
+
+## Inherited from the 7900 XTX fork
+
+Everything below is [avatarmanz/VIctory-7900XTX](https://github.com/avatarmanz/VIctory-7900XTX)'s
+work, kept as it was. Its measurements were made on an RX 7900 XTX with 64 GB of
+RAM, not on this machine.
 
 ### Renderer patches (off by default while they are tested)
 
@@ -59,54 +136,9 @@ the frame now is the one thread that submits the title's work to the card
 | `VICTORY_AMBIENT_SETTLE` | How fast light settles after walking indoors (on by default, `250,3`; `0` turns it off) |
 | `VICTORY_TEXTURE_STORE=1` | Converted textures kept between runs (about 8 ms a frame for now: off) |
 
-What is known to be wrong:
+### What it changed from VIctory
 
-- Trees, signs and far objects flicker in the distance in some places.
-- Lighting is too bright or too dark after walking indoors, until the title has
-  run for a while; rooms with little direct light are too dark without `-RayTracing`.
-- Textures of what just came into view appear late while the title streams.
-- The first run of a new build stutters while the driver makes pipelines
-  (`victory warm` makes them ahead).
-- Recording a frame in the world makes the title's own watchdog end it.
-
-## How to run it
-
-You need Windows 10/11 x64, a CPU with AVX2, a Direct3D 12 GPU with shader
-model 6.6 and mesh shaders, Rust (the toolchain is pinned), the MSVC build
-tools, and your own dump of the title.
-
-```powershell
-git clone https://github.com/avatarmanz/VIctory-7900XTX
-cd VIctory-7900XTX
-copy victory.example.toml victory.toml      # then set your paths, outside this folder
-cargo build --locked --profile diag -p victory --features diagnostics
-scripts\play.ps1 -Exe <path of your copy's executable>
-```
-
-`scripts\play.ps1 -Safe` leaves out the newest, faster ways; try it first when
-something is wrong. `-RayTracing` turns the title's ray-traced indirect light on.
-
-On a hybrid-graphics PC, the runtime and offline pipeline checks prefer a
-high-performance adapter with Shader Model 6.6. The runtime logs its adapter
-name, PCI vendor and device IDs, and dedicated VRAM. Set
-`VICTORY_D3D12_ADAPTER` to a zero-based DXGI index or part of the adapter's
-name to select it explicitly. With the launcher, pass
-`-More @{VICTORY_D3D12_ADAPTER='NVIDIA'}`.
-
-Before the first run, ahead of time (both can be stopped and go on later):
-
-```powershell
-target\diag\victory.exe shaders <the shader archives>   # every shader translated, minutes
-target\diag\victory.exe warm --used                     # pipelines earlier runs drew with, for a new driver or build
-```
-
-Commands, debugging switches and upstream's own description:
-[docs/README-fxceless.md](docs/README-fxceless.md). Every `VICTORY_...` switch is
-described in a comment where it is read.
-
-## What is different here
-
-In short; the reasons and the measurements are in [docs/findings.md](docs/findings.md).
+The reasons and the measurements are in [docs/findings.md](docs/findings.md).
 
 - **List calls are written down, not carried out, on the title's threads**
   (`VICTORY_THIN`): eight threads of ours translate them.
@@ -126,16 +158,69 @@ In short; the reasons and the measurements are in [docs/findings.md](docs/findin
 - **Frame record and replay** with per-pass times and shader variants compared
   turn by turn ([docs/replay.md](docs/replay.md)).
 
+What it lists as wrong:
+
+- Trees, signs and far objects flicker in the distance in some places.
+- Lighting is too bright or too dark after walking indoors, until the title has
+  run for a while; rooms with little direct light are too dark without `-RayTracing`.
+- Textures of what just came into view appear late while the title streams.
+- The first run of a new build stutters while the driver makes pipelines
+  (`victory warm` makes them ahead).
+- Recording a frame in the world makes the title's own watchdog end it.
+
+## How to run it
+
+You need Windows 10/11 x64, a CPU with AVX2, a Direct3D 12 GPU with shader
+model 6.6 and mesh shaders, Rust (the toolchain is pinned), the MSVC build
+tools, and your own dump of the title.
+
+```powershell
+git clone https://github.com/kyokyotosh/VIctory-6700XT
+cd VIctory-6700XT
+copy victory.example.toml victory.toml      # then set your paths, outside this folder
+cargo build --locked --profile diag -p victory --features diagnostics
+scripts\play.ps1 -Exe <path of your copy's executable>
+```
+
+`scripts\play.ps1 -Safe` leaves out the newest, faster ways; try it first when
+something is wrong. `-RayTracing` turns the title's ray-traced indirect light on.
+If the device is still lost on your PC, `-More @{VICTORY_RELAY='0'}` waits for
+every submission (slower, but it was the one setting that ran before this fork's
+changes).
+
+On a hybrid-graphics PC, the runtime and offline pipeline checks prefer a
+high-performance adapter with Shader Model 6.6. The runtime logs its adapter
+name, PCI vendor and device IDs, dedicated VRAM, and the memory segments the
+graphics kernel reports. Set `VICTORY_D3D12_ADAPTER` to a zero-based DXGI index
+or part of the adapter's name to select it explicitly. With the launcher, pass
+`-More @{VICTORY_D3D12_ADAPTER='NVIDIA'}`.
+
+Before the first run, ahead of time (both can be stopped and go on later):
+
+```powershell
+target\diag\victory.exe shaders <the shader archives>   # every shader translated, minutes
+target\diag\victory.exe warm --used                     # pipelines earlier runs drew with, for a new driver or build
+```
+
+Commands, debugging switches and upstream's own description:
+[docs/README-fxceless.md](docs/README-fxceless.md). Every `VICTORY_...` switch is
+described in a comment where it is read.
+
 ## Credits
 
 This is a tree of other people's work with more on top. The history is kept, and
 commits taken from elsewhere name the commit and its author.
 
+- **[avatarmanz/VIctory-7900XTX](https://github.com/avatarmanz/VIctory-7900XTX)**
+  by avatarmanz: the fork this one is cloned from, with its renderer patches,
+  its threads and its findings. Nearly all of the speed here is its work.
+- **@Zayfway**: [PR #225](https://github.com/avatarmanz/VIctory-7900XTX/pull/225),
+  the card-buffer limits for 10-12 GB cards this fork's tier is built on.
 - **[VIctory](https://github.com/Marvisak/VIctory)** by Marvisak and its
   contributors: the loader, the runtime services, the Direct3D 12 back end and
   the shader recompiler.
 - **[fxceless/victory-fork](https://github.com/fxceless/victory-fork)**: the fork
-  this one started from, and the people whose pull requests it carries.
+  the 7900 XTX fork started from, and the people whose pull requests it carries.
 - **[DexNom/VIctory](https://github.com/DexNom/VIctory)**: ray tracing fixes,
   cube gradients, sparse textures.
 - **[Belobug/VIctory-Belobug-AMD](https://github.com/Belobug/VIctory-Belobug-AMD)**:
@@ -147,7 +232,8 @@ commits taken from elsewhere name the commit and its author.
 - **Geckomacabre** and **cxy0072019-sketch**: the texture read-back.
 - **[XCL](https://github.com/ivall/xcl)** (GPL-2.0-only) was read for how the same
   title behaves under another layer; no code of it is here.
-- This fork's changes were made with [Claude Code](https://claude.com/claude-code).
+- This fork's changes, like the 7900 XTX fork's, were made with
+  [Claude Code](https://claude.com/claude-code).
 
 ## License
 
