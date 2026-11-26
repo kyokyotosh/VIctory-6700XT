@@ -224,14 +224,16 @@ or part of the adapter's name to select it explicitly. With the launcher, pass
 `-More @{VICTORY_D3D12_ADAPTER='NVIDIA'}`.
 
 Controllers: Xbox pads (XInput), and PlayStation pads (DualSense, DualSense
-Edge, DualShock 4) by USB or Bluetooth with no driver or DS4Windows, through
-Windows.Gaming.Input. Cross is A, Circle B, Square X, Triangle Y, Create View,
+Edge, DualShock 4) by USB or Bluetooth with no driver or DS4Windows, read from
+their own HID reports. Cross is A, Circle B, Square X, Triangle Y, Create View,
 Options Menu; rumble, the touchpad, the gyro and the adaptive triggers are not
-passed on. `VICTORY_PS_PADS`: `auto` (the default) reads a PlayStation pad only
+passed on. With Steam running, turn its PlayStation desktop layout off (or quit
+Steam): Steam turns the pad into mouse and keys for windows that are not its
+games. `VICTORY_PS_PADS`: `auto` (the default) reads a PlayStation pad only
 while no Xbox pad is connected, so DS4Windows' or Steam's Xbox pad and the pad
-under it are not both read; `1` always; `0` never. A pad's buttons and axes are
-logged when it connects; `-More @{VICTORY_PS_PADS_RAW='1'}` logs every raw
-change, to check the mapping. With no pad connected the keyboard is one:
+under it are not both read; `1` always; `0` never. A pad is logged when it
+connects; `-More @{VICTORY_PS_PADS_RAW='1'}` logs every new report's bytes,
+to check the mapping. With no pad connected the keyboard is one:
 W/A/S/D and I/J/K/L the sticks, the arrows the D-pad, Enter/Backspace/X/Y the
 A/B/X/Y buttons, Q/E the shoulders, Z/C the triggers, F/H the stick clicks,
 Esc/Tab Menu/View.
