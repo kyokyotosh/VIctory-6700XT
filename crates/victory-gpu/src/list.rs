@@ -203,6 +203,14 @@ impl Detached {
     pub(crate) fn host(&self) -> &crate::host::HostList {
         &self.host
     }
+
+    /// Its submission has run: the dynamic slots of its descriptor tables
+    /// go back now, not when the list is buried 64 submissions later (they
+    /// ran out at about 10,000 draws a frame; beloooo,
+    /// avatarmanz/VIctory-7900XTX e942896).
+    pub(crate) fn release_tables(&mut self) {
+        self._state.tables_done();
+    }
 }
 
 /// A host list that has run and waits to be used again, and the bytes of

@@ -1277,7 +1277,40 @@ mod tests {
 
 /// The batches of clamped records in one scratch buffer
 /// ([`HostList::batch_place`]).
-const BATCHES: u32 = 8;
+const BATCHES: u32 = 32;
+
+/// Scratch buffers of batched clamps ([`HostList::batch_place`]) that lists
+/// gave back once all their submissions had run, in the common state: lists
+/// share them, so an idle list keeps none (beloooo,
+/// avatarmanz/VIctory-7900XTX e942896). All have one size.
+struct BatchBuffer(ID3D12Resource);
+
+// SAFETY: D3D12 resources are free-threaded; a buffer is in the pool only
+// while no list holds it.
+unsafe impl Send for BatchBuffer {}
+
+static SPARE_BATCHES: Mutex<Vec<BatchBuffer>> = Mutex::new(Vec::new());
+
+fn take_batch_buffer(size: u64) -> Option<ID3D12Resource> {
+    if let Some(BatchBuffer(buffer)) = SPARE_BATCHES.lock().unwrap_or_else(|e| e.into_inner()).pop() {
+        return Some(buffer);
+    }
+    let made = host()?.uav_buffer(size)?;
+    name(&made, || format!("indirect batches {size:#x}"));
+    Some(made)
+}
+
+/// Keeps up to 64 (16 without [`keep_freed`]); the rest are released.
+fn give_batch_buffers(buffers: Vec<ID3D12Resource>) {
+    let most = if keep_freed() { 64 } else { 16 };
+    let mut spare = SPARE_BATCHES.lock().unwrap_or_else(|e| e.into_inner());
+    for buffer in buffers {
+        if spare.len() >= most {
+            break;
+        }
+        spare.push(BatchBuffer(buffer));
+    }
+}
 
 /// A host command list and its allocator, always used together.
 pub(crate) struct HostList {
@@ -5160,7 +5193,7 @@ impl Host {
         let mut telling = std::time::Instant::now();
         for item in items {
             telling = match item {
-                Late::Run(flight) => {
+                Late::Run(mut flight) => {
                     last = flight.number;
                     for &i in &flight.order {
                         read_backs(flight.lists[i].host());
@@ -5170,6 +5203,12 @@ impl Host {
                     }
                     if let Some(own) = flight.own {
                         own.landed();
+                    }
+                    // The flight has run: its lists' descriptor tables'
+                    // slots go back now, not when the lists are buried
+                    // (beloooo, avatarmanz/VIctory-7900XTX e942896).
+                    for detached in &mut flight.lists {
+                        detached.release_tables();
                     }
                     landed.push((flight.lists, flight.order));
                     crate::land::spent(crate::land::stat::READ_BACKS, telling)
@@ -5640,13 +5679,16 @@ impl Host {
             let mut landed = Vec::new();
             for item in items {
                 match item {
-                    Late::Run(flight) => {
+                    Late::Run(mut flight) => {
                         last = flight.number;
                         for &i in &flight.order {
                             read_backs(flight.lists[i].host());
                         }
                         if let Some(card) = flight.card {
                             self.card_done(card);
+                        }
+                        for detached in &mut flight.lists {
+                            detached.release_tables();
                         }
                         landed.push((flight.lists, flight.order));
                     }
@@ -6627,6 +6669,17 @@ impl HostList {
                 give_chunks(std::mem::take(&mut scratch.chunks));
             }
         }
+        // The batches' scratch buffers too, if the list closed (which put
+        // them back in the common state, `batches_common`).
+        {
+            let mut args = self.batch_args.lock().unwrap_or_else(|e| e.into_inner());
+            let open = std::mem::take(&mut args.1);
+            let buffers = std::mem::take(&mut args.0);
+            drop(args);
+            if open == 0 {
+                give_batch_buffers(buffers);
+            }
+        }
         // SAFETY: the list is not executing.
         let reset = unsafe {
             self.allocator
@@ -7449,17 +7502,17 @@ impl HostList {
     }
 
     /// Where the next batch of clamped records goes: a device-local buffer
-    /// the list keeps from recording to recording, the batch's place in it
-    /// and the state the buffer is in. Every batch of a recording has a place
-    /// of its own: the executions before it may still read theirs.
+    /// the list holds until its reset (then the lists' pool,
+    /// [`give_batch_buffers`]), the batch's place in it and the state the
+    /// buffer is in. Every batch of a recording has a place of its own: the
+    /// executions before it may still read theirs.
     pub(crate) fn batch_place(&self) -> Option<(ID3D12Resource, u32, D3D12_RESOURCE_STATES)> {
         use crate::indirect::batch::{JOBS, SLOT};
         let mut args = self.batch_args.lock().unwrap_or_else(|e| e.into_inner());
         let (buffer, i) = ((args.1 / BATCHES) as usize, args.1 % BATCHES);
         if buffer == args.0.len() {
             let size = u64::from(BATCHES * JOBS * SLOT);
-            let made = host()?.uav_buffer(size)?;
-            name(&made, || format!("indirect batches {size:#x}"));
+            let made = take_batch_buffer(size)?;
             args.0.push(made);
         }
         args.1 += 1;

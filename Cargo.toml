@@ -71,9 +71,16 @@ opt-level = 2
 
 [profile.release]
 debug = "line-tables-only"
+# Thin LTO and one unit: the thread that prepares submissions sets the frame
+# rate here (after avatarmanz/VIctory-7900XTX, beloooo e942896).
+lto = "thin"
+codegen-units = 1
 
 # The development build: release code generation plus the `diagnostics`
 # feature (`cargo build --profile diag -p victory --features diagnostics`),
 # kept in its own folder so it does not evict the plain release build.
 [profile.diag]
 inherits = "release"
+# Builds in a minute, as before the release profile took LTO.
+lto = false
+codegen-units = 16
