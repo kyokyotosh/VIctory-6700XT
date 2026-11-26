@@ -166,29 +166,40 @@ pub(crate) fn cards() -> bool {
     *ON.get_or_init(|| std::env::var_os("VICTORY_CARD_BUFFERS").is_none_or(|v| v != "0"))
 }
 
-/// Default `(min_mb, max_mb)` for [`card_limits`] chosen from the adapter's
+/// Default `(min_kib, max_mb)` for [`card_limits`] chosen from the adapter's
 /// local VRAM budget (`DXGI_QUERY_VIDEO_MEMORY_INFO.Budget`), in bytes.
 ///
-/// - Unknown (`None`, e.g. WARP) or `<= 12 GiB` (8–12 GB cards, whose WDDM
-///   budget is below 12 GiB): `(16, 512)` MiB, matching the 12 GB baseline.
+/// - Unknown (`None`, e.g. WARP) or `<= 9 GiB` (8 GB cards):
+///   16 MiB / 512 MiB.
+/// - `> 9 GiB` and `<= 12 GiB` (10–12 GB cards, whose WDDM budget is about
+///   11 GiB): 1 MiB / 1024 MiB (PR #225 by @Zayfway gave this tier its own
+///   limits). With 16 MiB / 512 MiB the CPU looks for shader writes in the
+///   copies left in the PC's memory: on an RX 6700 XT 67 ms a frame of
+///   snapshots, 6.8 fps in the world; with 1 MiB / 1024 MiB, 3 ms and 9–11
+///   fps. The PR's 1536 MiB (from an RTX 3060 12 GB, 2.5 -> 7.0 fps) put the
+///   6700 XT 1.6 GB over the budget the system cuts to at the world load
+///   (about 10.1 GB), and it fell to 1.2 fps as the system paged.
 /// - `> 12 GiB` and `< 20 GiB` (16 GB cards, whose WDDM budget is typically
-///   ~13.5–15.2 GiB): `(4, 2048)` MiB.
-/// - `>= 20 GiB` (24–32+ GB cards): `(1, (budget_mb / 4).min(8192))` MiB,
+///   ~13.5–15.2 GiB): 4 MiB / 2048 MiB.
+/// - `>= 20 GiB` (24–32+ GB cards): 1 MiB / `(budget_mb / 4).min(8192)` MiB,
 ///   capping at 25% of local budget (at most 8 GiB) so "before" twins (up to 2x)
 ///   still leave headroom for textures and render targets.
-fn default_card_limits_mb(local_vram_budget: Option<u64>) -> (u64, u64) {
+fn default_card_limits(local_vram_budget: Option<u64>) -> (u64, u64) {
     let Some(budget_bytes) = local_vram_budget else {
-        return (16, 512);
+        return (16 << 10, 512);
     };
     let budget_mb = budget_bytes >> 20;
+    const NINE_GIB_MB: u64 = 9 * 1024;
     const TWELVE_GIB_MB: u64 = 12 * 1024;
     const TWENTY_GIB_MB: u64 = 20 * 1024;
-    if budget_mb <= TWELVE_GIB_MB {
-        (16, 512)
+    if budget_mb <= NINE_GIB_MB {
+        (16 << 10, 512)
+    } else if budget_mb <= TWELVE_GIB_MB {
+        (1 << 10, 1024)
     } else if budget_mb < TWENTY_GIB_MB {
-        (4, 2048)
+        (4 << 10, 2048)
     } else {
-        (1, (budget_mb / 4).min(8192))
+        (1 << 10, (budget_mb / 4).min(8192))
     }
 }
 
@@ -201,8 +212,11 @@ fn resolve_card_limits(
     max_mb_override: Option<u64>,
 ) -> (u64, u64) {
     const MIB: u64 = 1 << 20;
-    let (default_min_mb, default_max_mb) = default_card_limits_mb(local_vram_budget);
-    let min_bytes = min_mb_override.unwrap_or(default_min_mb).saturating_mul(MIB).max(MIB);
+    let (default_min_kib, default_max_mb) = default_card_limits(local_vram_budget);
+    let min_bytes = match min_mb_override {
+        Some(mb) => mb.saturating_mul(MIB).max(MIB),
+        None => default_min_kib << 10,
+    };
     let max_bytes = max_mb_override.unwrap_or(default_max_mb).saturating_mul(MIB);
     (min_bytes, max_bytes)
 }
@@ -212,8 +226,9 @@ fn resolve_card_limits(
 /// shaders write takes its size twice), both in bytes:
 /// `VICTORY_CARD_BUFFERS_MIN_MB` and `VICTORY_CARD_BUFFERS_MB`.
 /// Defaults scale with the adapter's local VRAM budget (16 MiB / 512 MiB on
-/// `<= 12 GiB` budgets, 4 MiB / 2048 MiB on 16 GB cards, 1 MiB / up to 8192 MiB
-/// on `>= 20 GiB` budgets), and explicit env vars always override.
+/// `<= 9 GiB` budgets, 1 MiB / 1024 MiB on 10–12 GB cards, 4 MiB / 2048 MiB
+/// on 16 GB cards, 1 MiB / up to 8192 MiB on `>= 20 GiB` budgets), and
+/// explicit env vars always override.
 fn card_limits() -> (u64, u64) {
     static LIMITS: std::sync::OnceLock<(u64, u64)> = std::sync::OnceLock::new();
     *LIMITS.get_or_init(|| {
@@ -5698,7 +5713,7 @@ pub(crate) fn exact_line(frames: f64) {
 #[cfg(test)]
 mod window_tests {
     use super::{
-        WINDOW, cover, default_card_limits_mb, grid, holder, longest_tail, resolve_card_limits,
+        WINDOW, cover, default_card_limits, grid, holder, longest_tail, resolve_card_limits,
         tail_of, window_of, window_victims,
     };
 
@@ -5727,29 +5742,36 @@ mod window_tests {
         const GIB: u64 = 1 << 30;
         const MIB: u64 = 1 << 20;
 
-        // Unknown (WARP / query failure) and <= 12 GiB keep the 12 GB baseline.
-        assert_eq!(default_card_limits_mb(None), (16, 512));
-        assert_eq!(default_card_limits_mb(Some(8 * GIB)), (16, 512));
-        assert_eq!(default_card_limits_mb(Some(11 * GIB)), (16, 512));
-        assert_eq!(default_card_limits_mb(Some(12 * GIB)), (16, 512));
+        // Unknown (WARP / query failure) and <= 9 GiB (8 GB cards): 16 MiB / 512 MiB.
+        assert_eq!(default_card_limits(None), (16 << 10, 512));
+        assert_eq!(default_card_limits(Some(7 * GIB)), (16 << 10, 512));
+        assert_eq!(default_card_limits(Some(8 * GIB)), (16 << 10, 512));
+        assert_eq!(default_card_limits(Some(9 * GIB)), (16 << 10, 512));
+
+        // 10–12 GB tier (> 9 GiB, <= 12 GiB; an RTX 3060 12 GB reports 11,342 MiB,
+        // an RX 6700 XT 11,475 MiB): 1 MiB, 1024 MiB.
+        assert_eq!(default_card_limits(Some(11_342 * MIB)), (1 << 10, 1024));
+        assert_eq!(default_card_limits(Some(11 * GIB)), (1 << 10, 1024));
+        assert_eq!(default_card_limits(Some(12 * GIB)), (1 << 10, 1024));
 
         // 16 GB tier (> 12 GiB, < 20 GiB), including WDDM budgets around 13.5–15 GiB.
-        assert_eq!(default_card_limits_mb(Some(13 * GIB)), (4, 2048));
-        assert_eq!(default_card_limits_mb(Some(14 * GIB)), (4, 2048));
-        assert_eq!(default_card_limits_mb(Some(15 * GIB)), (4, 2048));
-        assert_eq!(default_card_limits_mb(Some(16 * GIB)), (4, 2048));
+        assert_eq!(default_card_limits(Some(13 * GIB)), (4 << 10, 2048));
+        assert_eq!(default_card_limits(Some(14 * GIB)), (4 << 10, 2048));
+        assert_eq!(default_card_limits(Some(15 * GIB)), (4 << 10, 2048));
+        assert_eq!(default_card_limits(Some(16 * GIB)), (4 << 10, 2048));
 
         // 24–32+ GB tier (>= 20 GiB): 1 MiB min, 25% of budget capped at 8192 MiB.
-        assert_eq!(default_card_limits_mb(Some(20 * GIB)), (1, 5120));
-        assert_eq!(default_card_limits_mb(Some(24 * GIB)), (1, 6144));
-        assert_eq!(default_card_limits_mb(Some(32 * GIB)), (1, 8192));
-        assert_eq!(default_card_limits_mb(Some(48 * GIB)), (1, 8192));
+        assert_eq!(default_card_limits(Some(20 * GIB)), (1 << 10, 5120));
+        assert_eq!(default_card_limits(Some(24 * GIB)), (1 << 10, 6144));
+        assert_eq!(default_card_limits(Some(32 * GIB)), (1 << 10, 8192));
+        assert_eq!(default_card_limits(Some(48 * GIB)), (1 << 10, 8192));
 
         // Explicit env overrides always win, clamp min to >= 1 MiB, and saturate on overflow.
         assert_eq!(resolve_card_limits(Some(32 * GIB), Some(8), Some(4096)), (8 * MIB, 4096 * MIB));
         assert_eq!(resolve_card_limits(Some(12 * GIB), Some(0), Some(1024)), (MIB, 1024 * MIB));
         assert_eq!(resolve_card_limits(None, Some(u64::MAX), Some(u64::MAX)), (u64::MAX, u64::MAX));
         assert_eq!(resolve_card_limits(None, None, None), (16 * MIB, 512 * MIB));
+        assert_eq!(resolve_card_limits(Some(11 * GIB), None, None), (MIB, 1024 * MIB));
     }
 
     /// An ask that may take any window takes the longest that holds all of
