@@ -1,5 +1,5 @@
 //! `gameinput.dll`: input devices from the host. Gamepads come from XInput
-//! (host slots 0-3), and PlayStation pads through Windows.Gaming.Input fill
+//! (host slots 0-3), and PlayStation pads read from their HID reports fill
 //! the slots XInput leaves empty (`sony`); while none is connected, the
 //! keyboard drives one stand-in gamepad (`FALLBACK_BUTTONS`). The keyboard is
 //! a device of its own too. A poll thread turns host state into readings (a
@@ -946,10 +946,10 @@ extern "system" fn device_status(this: *const Device) -> u32 {
     }
 }
 // shortcut: trigger motors are dropped (XInput has none), and PlayStation
-// pads get no rumble at all (`sony`). The host API that drives both without a
-// redistributable is Windows.Gaming.Input (`Gamepad.Vibration` for Xbox pads,
-// HID output reports for the others); the title sends trigger levels in slot
-// 0x50.
+// pads get no rumble yet (`sony`; their HID output report would drive it).
+// The host API that drives an Xbox pad's trigger motors without a
+// redistributable is Windows.Gaming.Input (`Gamepad.Vibration`); the title
+// sends trigger levels in slot 0x50.
 extern "system" fn set_rumble(this: *const Device, params: *const [f32; 4]) {
     // SAFETY: one of our devices.
     let device = unsafe { &*this };

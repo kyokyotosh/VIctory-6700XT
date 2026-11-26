@@ -1,22 +1,37 @@
-//! PlayStation pads (DualSense, DualSense Edge, DualShock 4), read through
-//! Windows.Gaming.Input's `RawGameController` (USB and Bluetooth, no driver
-//! to install) for the host slots XInput leaves empty.
+//! PlayStation pads (DualSense, DualSense Edge, DualShock 4), read from their
+//! own HID input reports (USB or Bluetooth, no driver or DS4Windows) for the
+//! host slots XInput leaves empty. The device is opened shared, so Steam
+//! holding it too is no obstacle; a thread per pad reads its reports.
+//!
+//! (Windows.Gaming.Input's raw controllers listed no DualSense in a desktop
+//! process on the RX 6700 XT's PC, the pad on USB: hence the reports.)
 //!
 //! `VICTORY_PS_PADS`: `auto` (the default) reads them only while no XInput
 //! pad is connected, so that the Xbox pad DS4Windows or Steam makes of one
 //! and the pad under it are not both read; `1` always; `0` never.
-//! `VICTORY_PS_PADS_RAW=1` logs each change of a pad's raw buttons, axes and
-//! hat, to check the mapping on a pad not seen yet.
+//! `VICTORY_PS_PADS_RAW=1` logs each new report's bytes.
 //!
 //! Cross is A, Circle B, Square X, Triangle Y; L1 and R1 the shoulders; L2 and
-//! R2 the triggers; Create View; Options Menu; L3 and R3 the sticks' clicks;
-//! the hat the D-pad. The PS button, the touchpad, the gyro, rumble and the
-//! adaptive triggers are not passed on.
+//! R2 the triggers; Create (Share) View; Options Menu; L3 and R3 the sticks'
+//! clicks; the hat the D-pad. The PS button, the touchpad, the gyro, rumble
+//! and the adaptive triggers are not passed on.
 
-use std::sync::LazyLock;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
-use windows::Gaming::Input::{GameControllerSwitchPosition, RawGameController};
+use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
+    DIGCF_DEVICEINTERFACE, DIGCF_PRESENT, SP_DEVICE_INTERFACE_DATA, SP_DEVICE_INTERFACE_DETAIL_DATA_W,
+    SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInterfaces, SetupDiGetClassDevsW, SetupDiGetDeviceInterfaceDetailW,
+};
+use windows_sys::Win32::Devices::HumanInterfaceDevice::{
+    HIDD_ATTRIBUTES, HIDP_CAPS, HidD_FreePreparsedData, HidD_GetAttributes, HidD_GetFeature, HidD_GetHidGuid,
+    HidD_GetPreparsedData, HidP_GetCaps,
+};
+use windows_sys::Win32::Foundation::{CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE};
+use windows_sys::Win32::Storage::FileSystem::{
+    CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, ReadFile,
+};
 
 use super::{
     A, B, DOWN, LEFT, LEFT_SHOULDER, LEFT_STICK, MENU, PadState, RIGHT, RIGHT_SHOULDER, RIGHT_STICK, UP, VIEW, X, Y,
@@ -25,26 +40,24 @@ use super::{
 /// Sony's USB vendor ID.
 const SONY: u16 = 0x054C;
 
-/// How often the list of controllers is looked at.
-const LOOK_AGAIN: Duration = Duration::from_secs(1);
-
-/// Buttons by their place in the pad's HID report (Square, Cross, Circle,
-/// Triangle, L1, R1, L2, R2, Create, Options, L3, R3, PS, touchpad).
-const BUTTONS: [(usize, u32); 10] = [
-    (0, X),
-    (1, A),
-    (2, B),
-    (3, Y),
-    (4, LEFT_SHOULDER),
-    (5, RIGHT_SHOULDER),
-    (8, VIEW),
-    (9, MENU),
-    (10, LEFT_STICK),
-    (11, RIGHT_STICK),
+/// The pads taken, by product ID, and whether each has the DualSense's
+/// report layout ([`Kind`]).
+const PRODUCTS: [(u16, Kind); 5] = [
+    (0x0CE6, Kind::DualSense),
+    (0x0DF2, Kind::DualSense), // Edge
+    (0x05C4, Kind::DualShock4),
+    (0x09CC, Kind::DualShock4),
+    (0x0BA0, Kind::DualShock4), // wireless adapter
 ];
 
-/// L2 and R2 as buttons, for a pad whose triggers are no axes.
-const DIGITAL_TRIGGERS: [usize; 2] = [6, 7];
+/// How often the devices are looked for again.
+const LOOK_AGAIN: Duration = Duration::from_secs(1);
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum Kind {
+    DualSense,
+    DualShock4,
+}
 
 #[derive(Clone, Copy, PartialEq)]
 enum Mode {
@@ -61,112 +74,86 @@ static MODE: LazyLock<Mode> = LazyLock::new(|| match std::env::var("VICTORY_PS_P
 
 static RAW: LazyLock<bool> = LazyLock::new(|| std::env::var_os("VICTORY_PS_PADS_RAW").is_some_and(|v| v == "1"));
 
-/// Which axes are the sticks (left x, left y, right x, right y) and which the
-/// triggers (left, right).
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(super) struct Layout {
-    sticks: [usize; 4],
-    triggers: Option<[usize; 2]>,
-}
-
-impl Layout {
-    /// From a reading at rest (0 to 1): the sticks rest in the middle, the
-    /// triggers at an end, each in the report's order. A pad held at the
-    /// first reading gets the usual order of a PlayStation pad's HID axes
-    /// (X, Y, Z, Rx, Ry, Rz: left stick, right x, the triggers, right y).
-    pub(super) fn at_rest(axes: &[f64]) -> Layout {
-        let middle: Vec<usize> = (0..axes.len()).filter(|&i| (axes[i] - 0.5).abs() < 0.25).collect();
-        let ends: Vec<usize> = (0..axes.len()).filter(|&i| (axes[i] - 0.5).abs() >= 0.25).collect();
-        match (middle.as_slice(), ends.as_slice()) {
-            (&[lx, ly, rx, ry], &[lt, rt, ..]) => Layout { sticks: [lx, ly, rx, ry], triggers: Some([lt, rt]) },
-            (&[lx, ly, rx, ry], _) => Layout { sticks: [lx, ly, rx, ry], triggers: None },
-            _ if axes.len() >= 6 => Layout { sticks: [0, 1, 2, 5], triggers: Some([3, 4]) },
-            _ => Layout { sticks: [0, 1, 2, 3], triggers: None },
-        }
-    }
-}
-
-/// The D-pad buttons of a hat position.
-fn hat(position: GameControllerSwitchPosition) -> u32 {
-    match position {
-        GameControllerSwitchPosition::Up => UP,
-        GameControllerSwitchPosition::UpRight => UP | RIGHT,
-        GameControllerSwitchPosition::Right => RIGHT,
-        GameControllerSwitchPosition::DownRight => DOWN | RIGHT,
-        GameControllerSwitchPosition::Down => DOWN,
-        GameControllerSwitchPosition::DownLeft => DOWN | LEFT,
-        GameControllerSwitchPosition::Left => LEFT,
-        GameControllerSwitchPosition::UpLeft => UP | LEFT,
+/// The D-pad buttons of a hat value (0 up, clockwise to 7 up-left; 8 none).
+fn hat(value: u8) -> u32 {
+    match value & 0x0F {
+        0 => UP,
+        1 => UP | RIGHT,
+        2 => RIGHT,
+        3 => DOWN | RIGHT,
+        4 => DOWN,
+        5 => DOWN | LEFT,
+        6 => LEFT,
+        7 => UP | LEFT,
         _ => 0,
     }
 }
 
-/// A console pad's state from a raw reading: buttons by report place, the
-/// hat, axes from 0 to 1 (HID's y grows downwards, the console's upwards).
-/// Raw values, no dead zone: titles apply their own.
-pub(super) fn convert(buttons: &[bool], position: GameControllerSwitchPosition, axes: &[f64], layout: &Layout) -> PadState {
-    let pressed = |i: usize| buttons.get(i).copied().unwrap_or(false);
-    let axis = |i: usize| axes.get(i).copied().unwrap_or(0.5);
-    let stick = |v: f64| ((v * 2.0 - 1.0) as f32).clamp(-1.0, 1.0);
-    let trigger = |n: usize| match layout.triggers {
-        Some(t) => (axis(t[n]) as f32).clamp(0.0, 1.0),
-        None => f32::from(u8::from(pressed(DIGITAL_TRIGGERS[n]))),
-    };
-    let [lx, ly, rx, ry] = layout.sticks;
+/// A console pad's state from the report's bytes: the sticks, the triggers
+/// and two button bytes (hat and face; shoulders, triggers, Create, Options,
+/// stick clicks). Raw values, no dead zone: titles apply their own.
+fn state(sticks: [u8; 4], triggers: [u8; 2], buttons: [u8; 2]) -> PadState {
+    let axis = |v: u8| ((f32::from(v) - 128.0) / 127.0).clamp(-1.0, 1.0);
+    let bit = |byte: u8, n: u8, button: u32| if byte & (1 << n) != 0 { button } else { 0 };
+    let [face, other] = buttons;
     PadState {
-        buttons: BUTTONS.iter().filter(|(i, _)| pressed(*i)).fold(hat(position), |all, (_, bit)| all | bit),
-        left_trigger: trigger(0),
-        right_trigger: trigger(1),
-        left_x: stick(axis(lx)),
-        left_y: -stick(axis(ly)),
-        right_x: stick(axis(rx)),
-        right_y: -stick(axis(ry)),
+        buttons: hat(face)
+            | bit(face, 4, X)
+            | bit(face, 5, A)
+            | bit(face, 6, B)
+            | bit(face, 7, Y)
+            | bit(other, 0, LEFT_SHOULDER)
+            | bit(other, 1, RIGHT_SHOULDER)
+            | bit(other, 4, VIEW)
+            | bit(other, 5, MENU)
+            | bit(other, 6, LEFT_STICK)
+            | bit(other, 7, RIGHT_STICK),
+        left_trigger: f32::from(triggers[0]) / 255.0,
+        right_trigger: f32::from(triggers[1]) / 255.0,
+        // HID's y grows downwards, the console's upwards.
+        left_x: axis(sticks[0]),
+        left_y: -axis(sticks[1]),
+        right_x: axis(sticks[2]),
+        right_y: -axis(sticks[3]),
     }
 }
 
-/// WinRT on the calling thread, once (the poll thread and the first caller).
-fn init_thread() {
-    thread_local! {
-        static INIT: () = {
-            // SAFETY: plain initialisation; a thread already in another
-            // apartment keeps it, and WinRT works there as well.
-            let _ = unsafe { windows::Win32::System::WinRT::RoInitialize(windows::Win32::System::WinRT::RO_INIT_MULTITHREADED) };
-        };
+/// The state in an input report (`report[0]` its ID), if it is one we know:
+/// the DualSense's full report over USB (0x01, 64 bytes: sticks 1-4,
+/// triggers 5-6, buttons 8-9) and over Bluetooth (0x31, the same one byte
+/// on); the short report a pad sends over Bluetooth before it is asked for
+/// the full one, and the DualShock 4's over USB (0x01: sticks 1-4, buttons
+/// 5-6, triggers 8-9), and the DualShock 4's over Bluetooth (0x11, two bytes
+/// on).
+pub(super) fn parse(report: &[u8], kind: Kind) -> Option<PadState> {
+    let full = |o: usize| -> Option<PadState> {
+        let b = report.get(o..o + 11)?;
+        Some(state([b[1], b[2], b[3], b[4]], [b[5], b[6]], [b[8], b[9]]))
+    };
+    let short = |o: usize| -> Option<PadState> {
+        let b = report.get(o..o + 10)?;
+        Some(state([b[1], b[2], b[3], b[4]], [b[8], b[9]], [b[5], b[6]]))
+    };
+    match (*report.first()?, kind) {
+        (0x01, Kind::DualSense) if report.len() >= 64 => full(0),
+        (0x31, Kind::DualSense) => full(1),
+        (0x01, _) => short(0),
+        (0x11, Kind::DualShock4) => short(2),
+        _ => None,
     }
-    INIT.with(|_| ());
 }
 
-/// One pad and its reading buffers.
+/// A handle that crosses to the reading thread.
+struct Handle(HANDLE);
+
+// SAFETY: a file handle, used by one thread at a time.
+unsafe impl Send for Handle {}
+
+/// One pad: where its device is, its latest state, whether its thread reads.
 struct Pad {
-    controller: RawGameController,
-    id: String,
-    layout: Option<Layout>,
-    buttons: Vec<bool>,
-    switches: Vec<GameControllerSwitchPosition>,
-    axes: Vec<f64>,
-    /// The last raw reading logged (`VICTORY_PS_PADS_RAW`).
-    logged: Option<(Vec<bool>, i32, Vec<i32>)>,
-}
-
-impl Pad {
-    fn read(&mut self) -> Option<PadState> {
-        self.controller.GetCurrentReading(&mut self.buttons, &mut self.switches, &mut self.axes).ok()?;
-        let layout = *self.layout.get_or_insert_with(|| {
-            let layout = Layout::at_rest(&self.axes);
-            tracing::info!(id = %self.id, axes_at_rest = ?self.axes, ?layout, "a PlayStation pad's axes");
-            layout
-        });
-        let position = self.switches.first().copied().unwrap_or(GameControllerSwitchPosition::Center);
-        if *RAW {
-            let now = (self.buttons.clone(), position.0, self.axes.iter().map(|v| (v * 100.0).round() as i32).collect());
-            if self.logged.as_ref() != Some(&now) {
-                let pressed: Vec<usize> = (0..self.buttons.len()).filter(|&i| self.buttons[i]).collect();
-                tracing::info!(id = %self.id, ?pressed, hat = position.0, axes_percent = ?now.2, "a PlayStation pad's raw reading");
-                self.logged = Some(now);
-            }
-        }
-        Some(convert(&self.buttons, position, &self.axes, &layout))
-    }
+    path: Vec<u16>,
+    state: Arc<Mutex<Option<PadState>>>,
+    reading: Arc<AtomicBool>,
 }
 
 /// The PlayStation pads found.
@@ -175,10 +162,6 @@ pub(super) struct Pads {
     looked: Option<Instant>,
     pads: Vec<Pad>,
 }
-
-// SAFETY: Windows.Gaming.Input's controllers are agile (callable from any
-// thread); the buffers are plain data, used under the source's lock.
-unsafe impl Send for Pads {}
 
 impl Pads {
     /// The pads' states, in the order they were found; none while `xinput`
@@ -189,100 +172,205 @@ impl Pads {
             Mode::Auto if xinput => return Vec::new(),
             _ => {}
         }
-        init_thread();
         if self.looked.is_none_or(|at| at.elapsed() >= LOOK_AGAIN) {
             self.looked = Some(Instant::now());
-            self.find();
+            self.pads.retain(|p| p.reading.load(Ordering::Relaxed));
+            for path in hid_paths() {
+                if !self.pads.iter().any(|p| p.path == path)
+                    && let Some(pad) = open(path)
+                {
+                    self.pads.push(pad);
+                }
+            }
         }
-        self.pads.iter_mut().filter_map(Pad::read).collect()
+        self.pads.iter().filter_map(|p| *p.state.lock().unwrap_or_else(|e| e.into_inner())).collect()
     }
+}
 
-    /// Takes in the PlayStation pads now connected and lets go of the others.
-    fn find(&mut self) {
-        let Ok(list) = RawGameController::RawGameControllers() else {
-            return;
-        };
-        let mut seen = Vec::new();
-        for controller in list {
-            let counts = (
-                controller.ButtonCount().unwrap_or(0),
-                controller.AxisCount().unwrap_or(0),
-                controller.SwitchCount().unwrap_or(0),
-            );
-            if controller.HardwareVendorId().ok() != Some(SONY) || counts.0 < 12 || counts.1 < 4 {
+/// The device paths of the HID devices present (null-terminated).
+fn hid_paths() -> Vec<Vec<u16>> {
+    let mut paths = Vec::new();
+    // SAFETY: plain SetupAPI queries into buffers of the sizes they ask for;
+    // the list is destroyed at the end.
+    unsafe {
+        let mut guid = std::mem::zeroed();
+        HidD_GetHidGuid(&mut guid);
+        let set = SetupDiGetClassDevsW(&guid, std::ptr::null(), std::ptr::null_mut(), DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
+        if set as isize == -1 {
+            return paths;
+        }
+        for index in 0.. {
+            let mut interface: SP_DEVICE_INTERFACE_DATA = std::mem::zeroed();
+            interface.cbSize = size_of::<SP_DEVICE_INTERFACE_DATA>() as u32;
+            if SetupDiEnumDeviceInterfaces(set, std::ptr::null(), &guid, index, &mut interface) == 0 {
+                break;
+            }
+            let mut size = 0;
+            SetupDiGetDeviceInterfaceDetailW(set, &interface, std::ptr::null_mut(), 0, &mut size, std::ptr::null_mut());
+            if size == 0 {
                 continue;
             }
-            let id = controller.NonRoamableId().map(|s| s.to_string()).unwrap_or_default();
-            if !self.pads.iter().any(|p| p.id == id) {
-                tracing::info!(
-                    name = %controller.DisplayName().map(|s| s.to_string()).unwrap_or_default(),
-                    product = format_args!("{:#06x}", controller.HardwareProductId().unwrap_or(0)),
-                    buttons = counts.0,
-                    axes = counts.1,
-                    switches = counts.2,
-                    "a PlayStation pad, read through Windows.Gaming.Input (VICTORY_PS_PADS)"
-                );
-                self.pads.push(Pad {
-                    controller,
-                    id: id.clone(),
-                    layout: None,
-                    buttons: vec![false; counts.0 as usize],
-                    switches: vec![GameControllerSwitchPosition::Center; counts.2 as usize],
-                    axes: vec![0.5; counts.1 as usize],
-                    logged: None,
-                });
+            // u32s: the detail's alignment.
+            let mut buffer = vec![0u32; (size as usize).div_ceil(4)];
+            let detail = buffer.as_mut_ptr().cast::<SP_DEVICE_INTERFACE_DETAIL_DATA_W>();
+            (*detail).cbSize = size_of::<SP_DEVICE_INTERFACE_DETAIL_DATA_W>() as u32;
+            if SetupDiGetDeviceInterfaceDetailW(set, &interface, detail, size, std::ptr::null_mut(), std::ptr::null_mut()) == 0 {
+                continue;
             }
-            seen.push(id);
+            let start = std::ptr::addr_of!((*detail).DevicePath).cast::<u16>();
+            let length = (0..).take_while(|&i| *start.add(i) != 0).count();
+            let mut path = std::slice::from_raw_parts(start, length).to_vec();
+            path.push(0);
+            paths.push(path);
         }
-        self.pads.retain(|p| {
-            let kept = seen.contains(&p.id);
-            if !kept {
-                tracing::info!(id = %p.id, "a PlayStation pad went");
-            }
-            kept
-        });
+        SetupDiDestroyDeviceInfoList(set);
     }
+    paths
+}
+
+/// Opens the device at `path` if it is a PlayStation pad we know, and starts
+/// its reading thread.
+fn open(path: Vec<u16>) -> Option<Pad> {
+    // Read and write (the Bluetooth feature report asks it of some stacks),
+    // else read alone.
+    let device = [GENERIC_READ | GENERIC_WRITE, GENERIC_READ]
+        .into_iter()
+        .map(|access| {
+            // SAFETY: a null-terminated path; the handle is closed on every way out.
+            unsafe {
+                CreateFileW(
+                    path.as_ptr(),
+                    access,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    std::ptr::null(),
+                    OPEN_EXISTING,
+                    0,
+                    std::ptr::null_mut(),
+                )
+            }
+        })
+        .find(|&handle| handle != INVALID_HANDLE_VALUE)?;
+    let close = |why: Option<&str>| {
+        // SAFETY: our handle, closed once.
+        unsafe { CloseHandle(device) };
+        if let Some(why) = why {
+            tracing::warn!(why, "a PlayStation pad that could not be read");
+        }
+        None
+    };
+    // SAFETY: plain data the call fills in.
+    let mut attributes: HIDD_ATTRIBUTES = unsafe { std::mem::zeroed() };
+    attributes.Size = size_of::<HIDD_ATTRIBUTES>() as u32;
+    // SAFETY: room for the attributes.
+    if !unsafe { HidD_GetAttributes(device, &mut attributes) } || attributes.VendorID != SONY {
+        return close(None);
+    }
+    let Some(&(_, kind)) = PRODUCTS.iter().find(|(id, _)| *id == attributes.ProductID) else {
+        return close(None);
+    };
+    // SAFETY: plain data the call fills in.
+    let mut caps: HIDP_CAPS = unsafe { std::mem::zeroed() };
+    let mut preparsed = 0;
+    // SAFETY: the parsed descriptor is freed right after its capabilities are read.
+    unsafe {
+        if !HidD_GetPreparsedData(device, &mut preparsed) {
+            return close(Some("no report descriptor"));
+        }
+        HidP_GetCaps(preparsed, &mut caps);
+        HidD_FreePreparsedData(preparsed);
+    }
+    let length = usize::from(caps.InputReportByteLength);
+    if length < 10 {
+        // Another of the pad's interfaces.
+        return close(None);
+    }
+    // Over Bluetooth a pad sends a short report until its calibration feature
+    // report is read; then the full one (DualSense 0x31, DualShock 4 0x11).
+    let bluetooth = length > 64;
+    if bluetooth {
+        let mut feature = [0u8; 64];
+        feature[0] = if kind == Kind::DualSense { 0x05 } else { 0x02 };
+        // SAFETY: a buffer of the length given.
+        unsafe { HidD_GetFeature(device, feature.as_mut_ptr().cast(), feature.len() as u32) };
+    }
+    tracing::info!(
+        product = format_args!("{:#06x}", attributes.ProductID),
+        ?kind,
+        bluetooth,
+        report_bytes = length,
+        "a PlayStation pad, read from its HID reports (VICTORY_PS_PADS)"
+    );
+    let state = Arc::new(Mutex::new(None));
+    let reading = Arc::new(AtomicBool::new(true));
+    let (into, flag, handle) = (state.clone(), reading.clone(), Handle(device));
+    let spawned = std::thread::Builder::new().name("victory-ps-pad".into()).spawn(move || {
+        let handle = handle;
+        let mut report = vec![0u8; length];
+        let mut last = Vec::new();
+        loop {
+            let mut read = 0;
+            // SAFETY: our handle and a buffer of the report's length; a
+            // blocking read, ended by an error when the pad goes.
+            if unsafe { ReadFile(handle.0, report.as_mut_ptr(), length as u32, &mut read, std::ptr::null_mut()) } == 0 {
+                break;
+            }
+            let report = &report[..read as usize];
+            if *RAW && report.get(..12) != last.get(..12) {
+                tracing::info!(bytes = ?&report[..report.len().min(12)], "a PlayStation pad's report");
+                last = report.to_vec();
+            }
+            if let Some(pad) = parse(report, kind) {
+                *into.lock().unwrap_or_else(|e| e.into_inner()) = Some(pad);
+            }
+        }
+        tracing::info!("a PlayStation pad went");
+        *into.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        flag.store(false, Ordering::Relaxed);
+        // SAFETY: our handle, closed once.
+        unsafe { CloseHandle(handle.0) };
+    });
+    if spawned.is_err() {
+        return close(Some("no thread to read it"));
+    }
+    Some(Pad { path, state, reading })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// A DualSense at rest in the HID order (sticks in the middle, triggers
-    /// at 0, right y last), Cross and Options held, the hat up-left, the left
-    /// stick fully up and right, R2 halfway.
+    /// A DualSense's USB report: Cross and Options held, the hat up-left, the
+    /// left stick fully right and up, R2 halfway, the right stick at rest.
     #[test]
-    fn a_dualsense_reading_becomes_a_console_pad() {
-        let layout = Layout::at_rest(&[0.5, 0.5, 0.5, 0.0, 0.0, 0.5]);
-        assert_eq!(layout, Layout { sticks: [0, 1, 2, 5], triggers: Some([3, 4]) });
-        let mut buttons = vec![false; 14];
-        buttons[1] = true;
-        buttons[9] = true;
-        let state = convert(&buttons, GameControllerSwitchPosition::UpLeft, &[1.0, 0.0, 0.5, 0.0, 0.5, 0.5], &layout);
+    fn a_dualsense_usb_report_becomes_a_console_pad() {
+        let mut report = [0u8; 64];
+        report[..11].copy_from_slice(&[0x01, 255, 0, 128, 128, 0, 128, 0, 0x20 | 7, 0x20, 0]);
+        let state = parse(&report, Kind::DualSense).unwrap();
         assert_eq!(state.buttons, A | MENU | UP | LEFT);
         assert_eq!((state.left_x, state.left_y, state.right_x, state.right_y), (1.0, 1.0, 0.0, 0.0));
-        assert_eq!((state.left_trigger, state.right_trigger), (0.0, 0.5));
+        assert_eq!(state.left_trigger, 0.0);
+        assert!((state.right_trigger - 128.0 / 255.0).abs() < 1e-6);
     }
 
-    /// Triggers placed elsewhere in the report are found by where they rest.
+    /// Over Bluetooth the full report is one byte on, and nothing on the hat
+    /// (8) is no D-pad button.
     #[test]
-    fn the_triggers_are_found_where_they_rest() {
-        assert_eq!(
-            Layout::at_rest(&[0.0, 0.5, 0.5, 0.5, 0.5, 0.0]),
-            Layout { sticks: [1, 2, 3, 4], triggers: Some([0, 5]) }
-        );
-        // Held at the first reading: the usual order.
-        assert_eq!(Layout::at_rest(&[0.9, 0.5, 0.5, 0.0, 0.0, 0.5]), Layout { sticks: [0, 1, 2, 5], triggers: Some([3, 4]) });
+    fn a_dualsense_bluetooth_report_is_one_byte_on() {
+        let mut report = [0u8; 78];
+        report[..12].copy_from_slice(&[0x31, 0, 128, 128, 128, 128, 255, 0, 0, 8 | 0x40, 0x01, 0]);
+        let state = parse(&report, Kind::DualSense).unwrap();
+        assert_eq!(state.buttons, B | LEFT_SHOULDER);
+        assert_eq!(state.left_trigger, 1.0);
     }
 
-    /// Without trigger axes L2 and R2 count as buttons.
+    /// The short report (a DualShock 4's, or any pad's over Bluetooth before
+    /// the full one): buttons before the triggers.
     #[test]
-    fn digital_triggers_without_axes() {
-        let layout = Layout::at_rest(&[0.5; 4]);
-        assert_eq!(layout.triggers, None);
-        let mut buttons = vec![false; 14];
-        buttons[7] = true;
-        let state = convert(&buttons, GameControllerSwitchPosition::Center, &[0.5; 4], &layout);
-        assert_eq!((state.left_trigger, state.right_trigger, state.buttons), (0.0, 1.0, 0));
+    fn the_short_report_has_the_buttons_first() {
+        let report = [0x01, 128, 128, 128, 128, 8 | 0x10, 0x10, 0, 0, 255];
+        let state = parse(&report, Kind::DualShock4).unwrap();
+        assert_eq!(state.buttons, X | VIEW);
+        assert_eq!((state.left_trigger, state.right_trigger), (0.0, 1.0));
+        assert_eq!(parse(&[0x07; 20], Kind::DualSense), None, "another report");
     }
 }
