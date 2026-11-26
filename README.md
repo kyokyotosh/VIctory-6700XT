@@ -42,6 +42,7 @@ from one PC:
 |---|---|
 | In the world, default settings | **8.8-12.6 fps, about 100 ms a frame** (about 45 ms preparing, 40 ms on the card), no device loss in 100+ s |
 | In the world, `-More @{VICTORY_OUTPUT='1920x1080'}` | **12-16 fps, 62-80 ms a frame**, the card about 60% busy and under its budget; the frame is set by preparing (about 60 ms) |
+| In the world, `-Console series-s` | **12-17 fps, steady after the first 15-20 s** (94% and 88% of samples at 10 fps or more), the card under its budget |
 | Before this fork's changes | the device was lost about 60-90 s in, at the first world load, every run; only `VICTORY_RELAY=0` ran (2.8 fps, 360 ms a frame) |
 | Menus, videos, loading screens | 30 fps |
 | Memory | about 27 GB of private memory; the card about 1 GB over the budget the system cuts to, which it holds |
@@ -63,11 +64,13 @@ videos and loading screens draw a few dozen):
 Either one counts only with no device loss, in two runs of the same build and
 settings, and is marked here with the runs, the settings and the commit.
 `scripts\fps-milestones.ps1 <log> <log>` scores run logs by these rules.
+`scripts\press-start.ps1 -Log <log>` gets an unattended run past the account
+picker (it presses Enter, the keyboard's A, while the title is in its menus).
 
 | Target | Range | Steady |
 |---|---|---|
 | 5 fps | **reached** (`b4ad9c9`, defaults) | **reached** (`b4ad9c9`, defaults: 91% and 95% of samples) |
-| 10 fps | **reached** (`b4ad9c9`, defaults: 12.6 and 11.1 fps) | not yet (defaults 22% and 32%; 1080p output 81% and 76%) |
+| 10 fps | **reached** (`b4ad9c9`, defaults: 12.6 and 11.1 fps) | not yet (Series S 94% and 88%; 1080p output 81% and 76%; defaults 22% and 32%) |
 | 15 fps | **reached** (`3c5f249`, `VICTORY_OUTPUT=1920x1080`: 16.2 and 16.6 fps) | not yet |
 | 20 fps | not yet | not yet |
 | 25 fps | not yet | not yet |
@@ -82,6 +85,12 @@ with the 1 MiB / 1024 MiB card-buffer limits of `b4ad9c9`):
 | `run-cards-D` | defaults (with a card-copy line setting that changed nothing and was not kept) | 5.7 7.2 8.4 5.9 8.8 9.4 9.4 10.4 2.5 11.1 10.7 8.8 10.8 10.8 8.9 9.7 10.3 8.9 9.8 10.9 9.2 9.1 |
 | `run-out1080` | defaults + `VICTORY_OUTPUT=1920x1080` | 10.0 5.7 10.4 10.7 11.0 8.9 15.1 13.8 15.0 16.2 12.9 11.6 14.5 14.6 13.2 13.7 13.1 13.3 12.5 9.9 8.3 |
 | `run-out1080-b` | defaults + `VICTORY_OUTPUT=1920x1080` | 10.5 5.5 9.0 6.9 4.3 12.7 16.0 16.3 16.4 16.6 16.3 15.7 6.5 13.6 14.7 14.0 14.4 13.7 12.7 13.4 12.4 |
+| `run-series-s` | defaults + `-Console series-s -Overlay` | 3.3 7.8 10.0 13.1 11.6 11.4 13.5 13.6 13.4 13.9 13.3 13.7 13.5 13.9 14.2 12.9 13.4 12.8 11.8 14.6 12.7 13.9 13.5 13.6 13.3 14.5 13.1 13.4 14.2 15.4 15.2 15.6 15.3 |
+| `run-series-s-b` | defaults + `-Console series-s -Overlay` | 0.3 8.5 7.8 12.9 11.6 12.0 13.9 14.4 14.3 14.4 14.2 14.1 14.8 9.9 12.3 13.2 12.6 13.2 13.3 13.6 13.6 15.9 15.1 14.5 13.9 14.4 12.9 16.5 15.2 15.1 15.0 15.1 16.8 17.4 |
+
+The Series S runs miss steady 10 at the world's first frames (the frame that
+leaves the loading screen, then 15-20 s of streaming in which the title itself
+takes 50-65 ms after a present before it records again).
 
 ## What this fork changed
 
@@ -193,9 +202,10 @@ something is wrong. `-RayTracing` turns the title's ray-traced indirect light on
 240 frames' rates (0-40 fps, red where the rate fell, green where it rose, a
 dotted baseline at 30 fps) with their lowest and highest, in the upper left
 corner; F3 hides and shows it. `-OverlayFull` adds the submitting thread's, the card's and the
-memory's numbers. `-More @{VICTORY_OUTPUT='1920x1080'}` has the title render at
-1080p, which on this card runs 12-16 fps instead of 9-12 (see
-[Milestones](#milestones)).
+memory's numbers. `-Console series-s` plays the Series S profile (1080p output,
+lighter content): on this card the steadiest, 12-17 fps in the world.
+`-More @{VICTORY_OUTPUT='1920x1080'}` keeps the Series X profile and renders at
+1080p, 12-16 fps. Native output runs 9-12 (see [Milestones](#milestones)).
 If the device is still lost on your PC, `-More @{VICTORY_RELAY='0'}` waits for
 every submission (slower, but it was the one setting that ran before this fork's
 changes).
