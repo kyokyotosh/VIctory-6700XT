@@ -260,6 +260,12 @@ fn fresh_list() -> Option<crate::host::HostList> {
     }
 }
 
+/// Whether a host list that ran waits for [`fresh_list`].
+#[cfg(windows)]
+pub(crate) fn has_idle() -> bool {
+    !IDLE.lock().unwrap_or_else(|e| e.into_inner()).0.is_empty()
+}
+
 /// The host sides of lists whose submission has run (submissions are
 /// waited for; `ran` names the ones it ran, by their place in `lists`):
 /// what they held is let go, as before, and the host lists are reset and

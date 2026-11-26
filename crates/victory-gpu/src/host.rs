@@ -1091,6 +1091,9 @@ fn create() -> windows::core::Result<Host> {
                 "host D3D12 adapter"
             );
         }
+        if let Some(adapter) = adapter.as_ref() {
+            segments::log(adapter);
+        }
         tracing::info!("host D3D12 device ready");
         Ok(Host {
             device,
@@ -3855,6 +3858,7 @@ pub(crate) mod indirects;
 mod panel;
 mod place;
 pub(crate) mod rec;
+mod segments;
 mod send;
 mod upq;
 pub(crate) use send::{goes_as_words, words_under};
@@ -5402,10 +5406,15 @@ impl Host {
         };
         LATE_STATS[0].fetch_add(1, Ordering::Relaxed);
         RELAY_MOVED.notify_one();
+        // An aperture segment near its limit with no idle host list: the
+        // flights land and give their lists back before more are made.
+        let tight = !crate::list::has_idle() && self.adapter.as_ref().is_some_and(segments::tight);
         if told && !late_writes() {
             self.settle(&mut submitted, WHY_WRITES);
         } else if sizes {
             self.settle(&mut submitted, WHY_READ);
+        } else if tight {
+            self.settle(&mut submitted, WHY_MOST);
         } else if most && relay_exact() {
             // Until there are fewer, not until there are none.
             relay_wait(WHY_MOST, |line| line.lists < late_most());
