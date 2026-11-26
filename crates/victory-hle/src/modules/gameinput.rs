@@ -1,8 +1,9 @@
 //! `gameinput.dll`: input devices from the host. Gamepads come from XInput
-//! (host slots 0-3); while none is connected, the keyboard drives one
-//! stand-in gamepad (`FALLBACK_BUTTONS`). The keyboard is a device of its own
-//! too. A poll thread turns host state into readings (a new one per change)
-//! and runs device callbacks on connect and disconnect.
+//! (host slots 0-3), and PlayStation pads through Windows.Gaming.Input fill
+//! the slots XInput leaves empty (`sony`); while none is connected, the
+//! keyboard drives one stand-in gamepad (`FALLBACK_BUTTONS`). The keyboard is
+//! a device of its own too. A poll thread turns host state into readings (a
+//! new one per change) and runs device callbacks on connect and disconnect.
 #![allow(non_snake_case)]
 // Title code calls these through the objects, passing pointers the real API
 // would trust.
@@ -944,10 +945,11 @@ extern "system" fn device_status(this: *const Device) -> u32 {
         0
     }
 }
-// shortcut: trigger motors are dropped (XInput has none). The host API that
-// drives them without a redistributable is Windows.Gaming.Input (WinRT
-// `Gamepad.Vibration`), which needs WinRT bindings this crate lacks outside
-// diagnostics builds; the title sends trigger levels in slot 0x50.
+// shortcut: trigger motors are dropped (XInput has none), and PlayStation
+// pads get no rumble at all (`sony`). The host API that drives both without a
+// redistributable is Windows.Gaming.Input (`Gamepad.Vibration` for Xbox pads,
+// HID output reports for the others); the title sends trigger levels in slot
+// 0x50.
 extern "system" fn set_rumble(this: *const Device, params: *const [f32; 4]) {
     // SAFETY: one of our devices.
     let device = unsafe { &*this };
@@ -1114,7 +1116,11 @@ pub(crate) fn module() -> HleModule {
     }
 }
 
-/// Host input: XInput pads, the keyboard while our process has focus.
+#[cfg(windows)]
+mod sony;
+
+/// Host input: XInput pads, PlayStation pads, the keyboard while our process
+/// has focus.
 #[cfg(windows)]
 mod host {
     use std::time::{Duration, Instant};
@@ -1177,10 +1183,22 @@ mod host {
     #[derive(Default)]
     pub(super) struct Host {
         empty_until: [Option<Instant>; PADS],
+        /// PlayStation pads, for the slots XInput leaves empty.
+        sony: super::sony::Pads,
+        /// The slots as the last look found them ([`Host::look`]).
+        slots: [Option<PadState>; PADS],
     }
 
-    impl Source for Host {
-        fn pad(&mut self, slot: usize) -> Option<PadState> {
+    impl Host {
+        /// Reads every slot: XInput's pads where it has them, PlayStation
+        /// pads in the others, in the order they were found.
+        fn look(&mut self) {
+            let xinput: [Option<PadState>; PADS] = std::array::from_fn(|slot| self.xinput(slot));
+            let mut sony = self.sony.read(xinput.iter().any(Option::is_some)).into_iter();
+            self.slots = std::array::from_fn(|slot| xinput[slot].or_else(|| sony.next()));
+        }
+
+        fn xinput(&mut self, slot: usize) -> Option<PadState> {
             if self.empty_until[slot].is_some_and(|until| Instant::now() < until) {
                 return None;
             }
@@ -1206,6 +1224,16 @@ mod host {
                 }
             }
             Some(pad)
+        }
+    }
+
+    impl Source for Host {
+        /// Slot 0 looks at the host anew: the hub asks slots 0 to 3 in turn.
+        fn pad(&mut self, slot: usize) -> Option<PadState> {
+            if slot == 0 {
+                self.look();
+            }
+            self.slots[slot]
         }
 
         fn keys(&mut self) -> Vec<KeyState> {
