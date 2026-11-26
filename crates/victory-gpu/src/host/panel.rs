@@ -2,13 +2,16 @@
 //! default; F3 shows and hides it while our window has the focus): white
 //! text on a black box in the upper left corner of what is shown, so that a
 //! screenshot carries them, with what it costs itself on the submitting
-//! thread. Made again twice a second from the counters of
-//! the frame-rate line, memory and textures; a frame itself only copies the
-//! box out of a buffer in the card's memory. Copied onto the swap chain's
-//! buffer, behind the title's picture: saved frames and the frame recorder
-//! see the title's own.
+//! thread, and under the text a graph of the last frames' times.
+//! `VICTORY_PANEL=fps` shows the frame rate, a frame's time, draws and the
+//! graph alone (`scripts\play.ps1 -Overlay`). Made again twice a second from
+//! the counters of the frame-rate line, memory and textures; a frame itself
+//! only copies the box out of a buffer in the card's memory. Copied onto the
+//! swap chain's buffer, behind the title's picture: saved frames and the
+//! frame recorder see the title's own.
 
-use std::sync::OnceLock;
+use std::collections::VecDeque;
+use std::sync::{LazyLock, OnceLock};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -25,10 +28,19 @@ const EVERY: Duration = Duration::from_millis(500);
 /// A character's dots, and with the space beside and below it.
 const GLYPH: (u32, u32) = (5, 7);
 const CELL: (u32, u32) = (6, 9);
-/// Characters in a line, lines, and the box's rim in dots.
+/// Characters in a line, lines (the full panel's), and the box's rim in dots.
 const COLUMNS: u32 = 40;
-const LINES: u32 = 9;
+const LINES: u32 = 10;
 const RIM: u32 = 3;
+
+/// Dots between the text and the graph, and the graph's height in dots.
+const GAP: u32 = 3;
+const GRAPH: u32 = 40;
+/// A frame's time at the graph's top, and its guide lines (30 and 10 fps).
+const GRAPH_MS: f32 = 125.0;
+const GUIDES_MS: [f32; 2] = [1000.0 / 30.0, 100.0];
+/// Frames the graph shows, one dot wide each, the newest on the right.
+const GRAPH_FRAMES: usize = (COLUMNS * CELL.0) as usize;
 
 /// The texts are put into one of these in turn: the card reads the others,
 /// at most half a second old.
@@ -37,6 +49,18 @@ const UPLOADS: usize = 4;
 fn asked() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| crate::switch::on("VICTORY_PANEL"))
+}
+
+/// `VICTORY_PANEL=fps`: the frame rate, a frame's time, draws and the graph
+/// alone.
+fn compact() -> bool {
+    static ON: LazyLock<bool> = LazyLock::new(|| std::env::var_os("VICTORY_PANEL").is_some_and(|v| v == "fps"));
+    *ON
+}
+
+/// The lines of text shown.
+fn lines_shown() -> u32 {
+    if compact() { 3 } else { LINES }
 }
 
 /// Whether it is shown now.
@@ -108,8 +132,8 @@ const fn glyph(c: u8) -> [u8; 7] {
 }
 
 /// The box's size in pixels, a dot being `scale` of them each way.
-const fn size(scale: u32) -> (u32, u32) {
-    ((COLUMNS * CELL.0 + 2 * RIM) * scale, (LINES * CELL.1 + 2 * RIM) * scale)
+fn size(scale: u32) -> (u32, u32) {
+    ((COLUMNS * CELL.0 + 2 * RIM) * scale, (lines_shown() * CELL.1 + GAP + GRAPH + 2 * RIM) * scale)
 }
 
 /// Pixels to a dot for a picture that high: a 720-line screenshot of it
@@ -118,11 +142,16 @@ fn scale(height: u32) -> u32 {
     (height / 540).max(1)
 }
 
-/// Whether a dot of the picture of `lines` is white.
-fn lit(lines: &[String], x: u32, y: u32) -> bool {
+/// Whether a dot of the picture of `lines` and `graph` (frame times in ms,
+/// the newest last) is white.
+fn lit(lines: &[String], graph: &[f32], x: u32, y: u32) -> bool {
     let (Some(x), Some(y)) = (x.checked_sub(RIM), y.checked_sub(RIM)) else {
         return false;
     };
+    let top = lines_shown() * CELL.1 + GAP;
+    if y >= top {
+        return graph_lit(graph, x, y - top);
+    }
     if x % CELL.0 >= GLYPH.0 || y % CELL.1 >= GLYPH.1 || x / CELL.0 >= COLUMNS {
         return false;
     }
@@ -130,6 +159,24 @@ fn lit(lines: &[String], x: u32, y: u32) -> bool {
         return false;
     };
     (glyph(c.to_ascii_uppercase())[(y % CELL.1) as usize] >> (GLYPH.0 - 1 - x % CELL.0)) & 1 != 0
+}
+
+/// Whether a dot of the graph is white: a bar for each frame, as tall as the
+/// frame took (up to [`GRAPH_MS`]), the newest on the right; the guide lines
+/// run across dotted, dark where they cross a bar.
+fn graph_lit(graph: &[f32], x: u32, y: u32) -> bool {
+    if y >= GRAPH || x as usize >= GRAPH_FRAMES {
+        return false;
+    }
+    let from_bottom = (GRAPH - 1 - y) as f32;
+    let dot_ms = GRAPH_MS / GRAPH as f32;
+    let shown = &graph[graph.len().saturating_sub(GRAPH_FRAMES)..];
+    let bar = (x as usize)
+        .checked_sub(GRAPH_FRAMES - shown.len())
+        .and_then(|i| shown.get(i))
+        .is_some_and(|&ms| from_bottom * dot_ms < ms);
+    let guide = x.is_multiple_of(2) && GUIDES_MS.iter().any(|&ms| (ms / dot_ms).floor() == from_bottom);
+    bar != guide
 }
 
 /// The bytes of a black and a white pixel of a swap chain's format.
@@ -147,14 +194,14 @@ fn colours(format: DXGI_FORMAT) -> Option<[&'static [u8]; 2]> {
 }
 
 /// The box as rows of `pitch` bytes.
-fn painted(lines: &[String], scale: u32, colours: [&[u8]; 2], pitch: usize) -> Vec<u8> {
+fn painted(lines: &[String], graph: &[f32], scale: u32, colours: [&[u8]; 2], pitch: usize) -> Vec<u8> {
     let (width, height) = size(scale);
     let bytes = colours[0].len();
     let mut out = vec![0; pitch * height as usize];
     for y in 0..height / scale {
         let top = pitch * (y * scale) as usize;
         for x in 0..width / scale {
-            let colour = colours[usize::from(lit(lines, x, y))];
+            let colour = colours[usize::from(lit(lines, graph, x, y))];
             for i in 0..scale {
                 let at = top + (x * scale + i) as usize * bytes;
                 out[at..at + bytes].copy_from_slice(colour);
@@ -212,8 +259,17 @@ fn text(c: &[f64; COUNTERS], ms: f64, worst: f64, cost: f64, host: &Host) -> Vec
     let (working, private) = crate::copystat::process_memory();
     let [budget, used, _, shared] = host.video_memory().unwrap_or_default();
     let idle = (c[1] / 1e3).min(ms);
+    let fps = 1e3 / ms.max(0.001);
+    let guide = format!("GRAPH 0-{GRAPH_MS:.0} MS  LINES AT 30 AND 10 FPS");
+    if compact() {
+        return vec![
+            format!("FPS {fps:.1}  MS/FRAME {ms:.1}"),
+            format!("DRAWS/FRAME {:.0}  LONGEST {worst:.0} MS", c[10]),
+            guide,
+        ];
+    }
     vec![
-        format!("FPS {:.1}  FRAME {ms:.1} MS  LONGEST {worst:.0}", 1e3 / ms.max(0.001)),
+        format!("FPS {fps:.1}  FRAME {ms:.1} MS  LONGEST {worst:.0}"),
         format!("DRAWS {:.0}  DROPPED {:.0}", c[10], c[8]),
         format!("SUBMIT BUSY {:.1}  WAITS FOR GPU {:.1}", c[0] / 1e3, c[3] / 1e3),
         format!("GPU BUSY {:.1}  IDLE BEHIND US {:.1}", ms - idle, c[2] / 1e3),
@@ -222,6 +278,7 @@ fn text(c: &[f64; COUNTERS], ms: f64, worst: f64, cost: f64, host: &Host) -> Vec
         format!("RAM {:.1} GB  IN MEMORY {:.1}", gb(private), gb(working)),
         format!("VRAM {:.1}/{:.1} GB  SHARED {:.1}", gb(used), gb(budget), gb(shared)),
         format!("THIS PANEL {:.0} US A FRAME", cost),
+        guide,
     ]
 }
 
@@ -271,9 +328,9 @@ impl Buffers {
         Some(Buffers { format, scale, pitch, uploads, card: card?, turn: 0, fresh: false })
     }
 
-    fn write(&mut self, lines: &[String]) {
+    fn write(&mut self, lines: &[String], graph: &[f32]) {
         let Some(colours) = colours(self.format) else { return };
-        let picture = painted(lines, self.scale, colours, self.pitch as usize);
+        let picture = painted(lines, graph, self.scale, colours, self.pitch as usize);
         self.turn = (self.turn + 1) % UPLOADS;
         // SAFETY: a mapped upload buffer of the picture's size, which the card read a second or more ago.
         unsafe { std::ptr::copy_nonoverlapping(picture.as_ptr(), self.uploads[self.turn].1, picture.len()) };
@@ -291,6 +348,9 @@ pub(super) struct Panel {
     cost: Duration,
     before: Counters,
     lines: Vec<String>,
+    /// The last frames' times in ms, the newest last, and those the box shows.
+    times: VecDeque<f32>,
+    graph: Vec<f32>,
     changed: bool,
     buffers: Option<Buffers>,
     failed: bool,
@@ -307,6 +367,8 @@ impl Panel {
             cost: Duration::ZERO,
             before: Counters::default(),
             lines: Vec::new(),
+            times: VecDeque::with_capacity(GRAPH_FRAMES),
+            graph: Vec::new(),
             changed: false,
             buffers: None,
             failed: false,
@@ -330,8 +392,15 @@ impl Panel {
             self.frames = 0;
         }
         self.frames += 1;
-        self.worst = self.worst.max((now - self.last).as_secs_f64() * 1e3);
+        let took = (now - self.last).as_secs_f64() * 1e3;
+        self.worst = self.worst.max(took);
         self.last = now;
+        if self.frames > 1 {
+            if self.times.len() == GRAPH_FRAMES {
+                self.times.pop_front();
+            }
+            self.times.push_back(took as f32);
+        }
         let elapsed = now - self.since;
         if elapsed < EVERY && !(line && elapsed * 2 >= EVERY) {
             return;
@@ -343,6 +412,7 @@ impl Panel {
         self.before = counters;
         let cost = self.cost.as_secs_f64() * 1e6 / frames;
         self.lines = text(&c, elapsed.as_secs_f64() * 1e3 / frames, self.worst, cost, host);
+        self.graph = self.times.iter().copied().collect();
         self.changed = true;
         (self.since, self.frames, self.worst) = (now, 0, 0.0);
         self.cost = now.elapsed();
@@ -374,7 +444,7 @@ impl Panel {
         }
         let Some(buffers) = &mut self.buffers else { return };
         if std::mem::take(&mut self.changed) {
-            buffers.write(&self.lines);
+            buffers.write(&self.lines, &self.graph);
         }
         let (w, h) = size(scale);
         let list = &list.list;
@@ -448,7 +518,7 @@ mod tests {
             let (width, height) = size(scale);
             let pitch = (width * 4).next_multiple_of(256) as usize;
             let colours = colours(DXGI_FORMAT_R10G10B10A2_UNORM).unwrap();
-            let picture = painted(&lines, scale, colours, pitch);
+            let picture = painted(&lines, &[], scale, colours, pitch);
             assert_eq!(picture.len(), pitch * height as usize);
             let at = |x: u32, y: u32| &picture[y as usize * pitch + x as usize * 4..][..4];
             // The rim is black, the first letter's top row lit in its middle.
@@ -470,5 +540,20 @@ mod tests {
         (a.0[1], b.0[1]) = (50, 20);
         let c = b.since(a, 10.0);
         assert_eq!((c[0], c[1]), (2.0, 2.0));
+    }
+
+    /// A frame at the graph's top fills its column, one half as long half
+    /// of it; the guide lines show dotted where no bar is.
+    #[test]
+    fn frames_are_bars() {
+        let graph = vec![GRAPH_MS / 2.0, GRAPH_MS];
+        let last = GRAPH_FRAMES as u32 - 1;
+        assert!(graph_lit(&graph, last, 0), "the top of the full bar");
+        assert!(graph_lit(&graph, last - 1, GRAPH - 1), "the foot of the half bar");
+        assert!(!graph_lit(&graph, last - 1, 0), "above the half bar");
+        assert!(!graph_lit(&graph, last - 2, GRAPH - 1), "no frame there yet");
+        let row_100 = GRAPH - 1 - (100.0 / (GRAPH_MS / GRAPH as f32)).floor() as u32;
+        assert!(graph_lit(&graph, 0, row_100), "the 10 fps line where no bar is");
+        assert!(!graph_lit(&graph, 1, row_100), "dotted");
     }
 }
