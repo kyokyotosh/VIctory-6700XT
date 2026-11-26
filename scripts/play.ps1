@@ -4,6 +4,7 @@
 # -RayTracing   the title's own ray-traced indirect light: lit interiors, about a third slower
 # -Overlay      FPS, ms a frame, draws a frame and a line chart of the last frames' rates in the upper left (F3 hides and shows it)
 # -OverlayFull  the same with the submitting thread's, the card's and memory's numbers
+# -Console      series-x (the default) or series-s: the Series S profile, 1080p output and lighter content
 # -Build        target\diag (the default, the build all measurements are of) or target\release
 # -More         other settings: -More @{VICTORY_PANEL='1'}
 # Run it from a normal window, not as administrator: the driver then keeps its shader cache elsewhere.
@@ -13,6 +14,7 @@ param(
     [switch]$RayTracing,
     [switch]$Overlay,
     [switch]$OverlayFull,
+    [ValidateSet('series-x', 'series-s')][string]$Console = 'series-x',
     [ValidateSet('diag', 'release')][string]$Build = 'diag',
     [hashtable]$More = @{}
 )
@@ -48,4 +50,4 @@ if ($discarded) {
 }
 $Exe = (Resolve-Path $Exe).Path
 Push-Location (Join-Path $PSScriptRoot '..')   # victory.toml is looked for here
-try { & $victory run $Exe --execute } finally { Pop-Location }
+try { & $victory run $Exe --console $Console --execute } finally { Pop-Location }
