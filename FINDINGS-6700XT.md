@@ -212,9 +212,20 @@ The cause: with no structures every reflection ray that leaves the screen misses
 `VICTORY_REFLECT_BOUND=<multiple>` (in `crate::ambient`, after each `CS_RayMiss`, an indirect dispatch the stand-in did not follow before): what it left is held to that multiple of the light around each point, the light the diffuse stand-in already gathers from the screen, and over it the room's light at that multiple takes its place. The water's own chain runs the same program and mirrors the sky truly; bounded, the sea near the shore went dark and green (`run-refl-bound`), so the buffer the water's resolve reads is left alone. Frame rate unchanged (12.4 against 12.1 fps median, from the save copy). The player, indoors: "way better"; other artifacts remain that are not the glossy floor. `play.ps1` sets `1`.
 
 
+## The refresh probe (VICTORY_REFRESH_PROBE_US, 2026-11-27)
+
+Ported from VIctory-NVIDIA-RT (`42c41ef`, `4749cd7`; branch `refresh-probe`): a small flush of refreshes (256 copies or fewer) runs on the submitting thread for up to the probe's time before the rest goes to the kept threads, instead of waking them every time. `VICTORY_REFRESH_PROBE_TEXTURES=1` lets a flush with only light textures (≤256 KiB) count as small. Their "fast" preset's 300 µs with textures, four runs from the 09:56 save copy, `-Console series-s`, about 330 s of world each:
+
+| | Runs | Median fps | Frame | Submitting thread busy | Refreshes (flushes) | Flushes done here alone / went on | Refreshes done here |
+|---|---|---|---|---|---|---|---|
+| off | `run-rp-off-a`, `-off-b` | 13.1, 13.4 | 76.7, 74.9 ms | 63.5, 62.2 ms | 22.0, 21.9 ms (42–43) | — | — |
+| on | `run-rp-on-a`, `-on-b` | 12.8, 12.9 | 78.1, 77.2 ms | 63.4, 63.6 ms | 22.3, 21.9 ms (42–43) | 8 / 0.3–0.5 a frame | ~97 a frame, 0.6–1.0 ms |
+
+No change. Only about 8 of the 43 flushes a frame are small, and they took about 1 ms in all; no flush counted as small because of its textures (0 a frame). The refreshes' time is in the big flushes. The same logs say where it goes: texture refreshes 10–12 ms a frame over all threads (3.2 ms of it asking the write watch and the guards), and the pass over the heap's views 12–13 ms looking at slots, 10.5 ms of it waited for at the lists' close. It stays off.
+
 ## Next steps
 
-1. Frame rate: at 1080p output the submitting thread's preparing (~60 ms) sets the frame; at native output (~100 ms a frame) the card (~80 ms of work, ~1 GB over the cut budget). Next: the refreshes and the wait for the heaps' records on the submitting thread. In the heavier street with 4 list threads the frame is about 77 ms and the card 66% busy.
+1. Frame rate: at 1080p output the submitting thread's preparing (~60 ms) sets the frame; at native output (~100 ms a frame) the card (~80 ms of work, ~1 GB over the cut budget). Next: the refreshes and the wait for the heaps' records on the submitting thread. In the heavier street with 4 list threads the frame is about 77 ms and the card 66% busy. The refresh probe changed nothing (above); what is left in the refreshes is the big flushes (textures, the heap's views).
 2. The card's memory runs slightly over the cut budget late in runs (10,077 / 9,997 MB); keep an eye on the GPU time if it creeps up.
 3. Fix the id 646 / id 538 validation errors separately.
 
