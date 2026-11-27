@@ -11,12 +11,13 @@ param([Parameter(Mandatory, ValueFromRemainingArguments)][string[]]$Logs)
 
 $targets = 5, 10, 15, 20, 25, 30
 foreach ($log in $Logs) {
-    $text = Get-Content -LiteralPath $log
-    $lost = [bool]($text | Select-String -SimpleMatch 'device removed' -Quiet)
-    $samples = foreach ($line in $text) {
-        if ($line -match 'victory_gpu::host: ([0-9.]+) fps, ([0-9.]+) ms/frame .*?, ([0-9]+) draws/frame') {
-            if ([int]$Matches[3] -ge 1000) { [double]$Matches[1] }
-        }
+    # PowerShell wraps a record over lines when it relays the console (play.ps1's
+    # `*>` or `Tee-Object`): matched over the whole text, colour codes out.
+    $text = (Get-Content -LiteralPath $log -Raw) -replace "$([char]27)\[[0-9;]*m", '' -replace '\s*\r?\n\s*', ' '
+    $lost = $text.Contains('device removed')
+    $found = [regex]::Matches($text, 'victory_gpu::host: ([0-9.]+) fps, ([0-9.]+) ms/frame .*?, ([0-9]+) draws/frame')
+    $samples = foreach ($m in $found) {
+        if ([int]$m.Groups[3].Value -ge 1000) { [double]$m.Groups[1].Value }
     }
     $samples = @($samples)
     $seconds = 5 * $samples.Count
