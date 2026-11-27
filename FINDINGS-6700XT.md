@@ -222,7 +222,16 @@ Ported from VIctory-NVIDIA-RT (`e994b90`, `cdef339`; branch `refresh-set`): the 
 | on | `run-rs-on-a`, `-on-b` | 13.6, 13.2 | 73.6, 75.9 ms | 62.7, 64.2 ms | 21.2, 21.0 ms | 4 / 16 | about 0.2 of 16 |
 | check (`VICTORY_REFRESH_SET_CHECK=1`) | `run-rs-check` | 13.0 | 77.2 ms | 65.5 ms | 22.5 ms | 4 / 16 | 0 mismatches |
 
-The refresh work is the same with it on: it left out about 0.2 of the 16 member refreshes a frame, and refreshes stayed at 21–22 ms. The gap in medians is the runs' own spread: the last 20 samples of a run vary between 11 and 15 fps from run to run, whatever the switch (`run-rs-on-a` ended at 15, `run-rs-on-b` at 11). It stays off. It only pays where the structure builder makes many copies (ray tracing).
+The refresh work is the same with it on: it left out about 0.2 of the 16 member refreshes a frame, and refreshes stayed at 21–22 ms. The gap in medians is the runs' own spread: the last 20 samples of a run vary between 11 and 15 fps from run to run, whatever the switch (`run-rs-on-a` ended at 15, `run-rs-on-b` at 11).
+
+With ray tracing (`play.ps1 -RayTracing`, `VICTORY_BVH_BUILDER=1`) the structure builder makes 71 copies (627 MB in 11 arenas) and about 250 build dispatches a frame, and the submitting thread is busy 86–91 ms of a 94–98 ms frame. Same save copy, four runs:
+
+| | Runs | Median fps | Frame | Submitting thread busy | Lists' steps | Refreshes | Set steps / added / left out a frame |
+|---|---|---|---|---|---|---|---|
+| off | `run-rt-count`, `run-rt-off-b` | 10.7, 10.3 | 93.8, 96.8 ms | 85.7, 89.2 ms | 32.2, 35.3 ms | 23.8, 26.4 ms | — |
+| on | `run-rt-on-a`, `-on-b` | 10.3, 10.2 | 97.2, 97.7 ms | 90.2, 91.3 ms | 34.7, 32.2 ms | 25.8, 23.6 ms | 110 / 421–484 / 8,300–9,900 |
+
+There it does skip 8,300–9,900 member refreshes a frame, but the frame does not move: a repeat was a cheap merge into a refresh already pending (`Batch::add`), and the walks over 71 members cost little. It stays off with ray tracing too.
 
 ## Next steps
 
