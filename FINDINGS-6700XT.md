@@ -212,9 +212,21 @@ The cause: with no structures every reflection ray that leaves the screen misses
 `VICTORY_REFLECT_BOUND=<multiple>` (in `crate::ambient`, after each `CS_RayMiss`, an indirect dispatch the stand-in did not follow before): what it left is held to that multiple of the light around each point, the light the diffuse stand-in already gathers from the screen, and over it the room's light at that multiple takes its place. The water's own chain runs the same program and mirrors the sky truly; bounded, the sea near the shore went dark and green (`run-refl-bound`), so the buffer the water's resolve reads is left alone. Frame rate unchanged (12.4 against 12.1 fps median, from the save copy). The player, indoors: "way better"; other artifacts remain that are not the glossy floor. `play.ps1` sets `1`.
 
 
+## The refresh set (VICTORY_REFRESH_SET, 2026-11-27)
+
+Ported from VIctory-NVIDIA-RT (`e994b90`, `cdef339`; branch `refresh-set`): the by-address memory copies a list brings up to date are one step shared by every list, and a submission adds again only the copies made stale since it last took them. There, with the structure builder on, it stood for about 245 copies on 191 lists a frame. Here the memory line says 3–4 copies, 16–17 dispatches a frame. Five runs from the 09:56 save copy, `-Console series-s`, about 330 s of world each:
+
+| | Runs | Median fps | Frame | Submitting thread busy | Refreshes | Set steps / members a frame | Left out as still done |
+|---|---|---|---|---|---|---|---|
+| off | `run-rs-off-a`, `-off-b` | 12.9, 13.0 | 77.8, 77.0 ms | 65.7, 64.8 ms | 21.8, 21.3 ms | — | — |
+| on | `run-rs-on-a`, `-on-b` | 13.6, 13.2 | 73.6, 75.9 ms | 62.7, 64.2 ms | 21.2, 21.0 ms | 4 / 16 | about 0.2 of 16 |
+| check (`VICTORY_REFRESH_SET_CHECK=1`) | `run-rs-check` | 13.0 | 77.2 ms | 65.5 ms | 22.5 ms | 4 / 16 | 0 mismatches |
+
+The refresh work is the same with it on: it left out about 0.2 of the 16 member refreshes a frame, and refreshes stayed at 21–22 ms. The gap in medians is the runs' own spread: the last 20 samples of a run vary between 11 and 15 fps from run to run, whatever the switch (`run-rs-on-a` ended at 15, `run-rs-on-b` at 11). It stays off. It only pays where the structure builder makes many copies (ray tracing).
+
 ## Next steps
 
-1. Frame rate: at 1080p output the submitting thread's preparing (~60 ms) sets the frame; at native output (~100 ms a frame) the card (~80 ms of work, ~1 GB over the cut budget). Next: the refreshes and the wait for the heaps' records on the submitting thread. In the heavier street with 4 list threads the frame is about 77 ms and the card 66% busy.
+1. Frame rate: at 1080p output the submitting thread's preparing (~60 ms) sets the frame; at native output (~100 ms a frame) the card (~80 ms of work, ~1 GB over the cut budget). Next: the refreshes and the wait for the heaps' records on the submitting thread. In the heavier street with 4 list threads the frame is about 77 ms and the card 66% busy. The refresh set changed nothing (above): our 21 ms of refreshes are the ordinary buffer copies' (about 6,700 a frame in 44 flushes), not by-address memory's.
 2. The card's memory runs slightly over the cut budget late in runs (10,077 / 9,997 MB); keep an eye on the GPU time if it creeps up.
 3. Fix the id 646 / id 538 validation errors separately.
 
