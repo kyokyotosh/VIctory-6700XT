@@ -2880,20 +2880,31 @@ impl State {
     /// The stand-in for the indirect light after a dispatch of `p`
     /// (`crate::ambient`). Whether it recorded anything.
     fn ambient(&self, list: &HostList, p: &HostPipeline, role: crate::ambient::Role) -> bool {
-        use crate::ambient::{AIR, DEPTH, LIGHT, RADIANCE, Role, Views};
+        use crate::ambient::{AIR, DEPTH, LIGHT, RADIANCE, REFLECT, Role, Views, WATER_REFLECTIONS};
         let Some(t) = p.stages.first().map(|s| s.translated()) else {
             return false;
         };
+        if role == Role::WaterResolve {
+            if let Some(r) = self.table_resource(t, true, ResourceType::Srv, WATER_REFLECTIONS) {
+                crate::ambient::note_water(r);
+            }
+            return false;
+        }
+        if role == Role::Reflect && self.table_resource(t, true, ResourceType::Uav, REFLECT).is_some_and(crate::ambient::is_water) {
+            return false;
+        }
         let entry = |kind: ResourceType, at: (u8, u32)| self.table_view(t, true, kind, at);
         let at = match role {
             Role::Resolve => LIGHT,
             Role::Radiance => RADIANCE,
             Role::Air => AIR,
+            Role::Reflect => REFLECT,
+            Role::WaterResolve => return false,
         };
         let image = entry(ResourceType::Uav, at);
         let depth = match role {
             Role::Resolve => entry(ResourceType::Srv, DEPTH),
-            Role::Radiance | Role::Air => image,
+            Role::Radiance | Role::Air | Role::Reflect | Role::WaterResolve => image,
         };
         let (Some((of, image)), Some((seen, depth))) = (image, depth) else {
             once!(?role, "no stand-in for the indirect light: other tables");
@@ -2914,6 +2925,27 @@ impl State {
         })
     }
 
+    /// The title resource a shader of the bound pipeline reads through a
+    /// table at (root parameter, dwords into the table).
+    fn table_resource(
+        &self,
+        t: &crate::pipeline::Translated,
+        compute: bool,
+        kind: ResourceType,
+        (slot, offset): (u8, u32),
+    ) -> Option<usize> {
+        t.used.iter().find(|u| {
+            u.kind == kind && u.root == RootType::Table && (u.slot, u.table_offset_dwords) == (slot, offset)
+        })?;
+        let Some(Root::Table(table)) = self.roots_ref(compute).get(usize::from(slot)) else {
+            return None;
+        };
+        match crate::descriptor::view(table + u64::from(offset) * 4)? {
+            View::Shader(r, _) | View::Unordered(r, ..) => Some(r),
+            _ => None,
+        }
+    }
+
     /// The view a shader of the bound pipeline reads through a table, at
     /// (root parameter, dwords into the table): its texture's or buffer's
     /// description and its place in the bound view heap. Tables made afresh
@@ -2926,16 +2958,7 @@ impl State {
         (slot, offset): (u8, u32),
     ) -> Option<(D3D12_RESOURCE_DESC, D3D12_GPU_DESCRIPTOR_HANDLE)> {
         let heap = (self.heaps[0] != 0).then(|| crate::descriptor::heap(self.heaps[0] as This).host()).flatten()?;
-        t.used.iter().find(|u| {
-            u.kind == kind && u.root == RootType::Table && (u.slot, u.table_offset_dwords) == (slot, offset)
-        })?;
-        let Some(Root::Table(table)) = self.roots_ref(compute).get(usize::from(slot)) else {
-            return None;
-        };
-        let resource = match crate::descriptor::view(table + u64::from(offset) * 4)? {
-            View::Shader(r, _) | View::Unordered(r, ..) => r,
-            _ => return None,
-        };
+        let resource = self.table_resource(t, compute, kind, (slot, offset))?;
         let start = match self.ambient_tables.iter().find(|m| m.0 == slot) {
             Some(m) => m.1,
             None => self.user_value(compute, slot, RootType::Table, 0),
@@ -4169,6 +4192,15 @@ impl State {
         }
         if kind == DISPATCH {
             self.buffers_written();
+            // The stand-in follows indirect dispatches too: the
+            // reflections' `CS_RayMiss` runs as one (`crate::ambient`).
+            if let Some(role) = p.stages.first().and_then(|s| s.shader.ambient)
+                && crate::ambient::on()
+                && self.ambient(list, p, role)
+            {
+                self.host_pipeline = 0;
+                self.host_roots[1] = 0;
+            }
         } else {
             self.drew(list, Some(p));
         }

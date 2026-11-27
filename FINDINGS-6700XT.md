@@ -203,6 +203,15 @@ Belobug's fork leaves `CS_ScreenProbes_ActivateRays` out while the structure bui
 
 Captured at the same moments after the world loads (`run-shot-off`, `run-shot-skip`), left out is darker where light bounces: the house walls and the shade under its deck in the opening view, the shade under the gazebo later. Here the pass feeds the indirect light instead of spoiling it, and costs nothing measurable, so it stays in and the port was removed.
 
+## The frosted, speckled floors indoors (2026-11-27)
+
+Traced from the player's own frames (`play.ps1 -Trace`, F9 in the house). Ruled out before: stray hits in structures the builder did not make (`VICTORY_RAYS_MISS=1` changed nothing indoors, by the player's screenshots), one texture bound in two slots, dropped indirect work, empty buffers in the miss and screen-space passes, the buffer refreshed from stale title memory.
+
+The cause: with no structures every reflection ray that leaves the screen misses, and the title's `CS_RayMiss` gives it the sky. Indoors a ray would have found a wall. In frame 2005 the raw reflections cover 93% of the floor in sky blue (61, 79, 103) against warm walls on screen (77, 76, 62); the denoiser averages that with the few dark screen-space hits, and the floor shows blue-white (116, 131, 149), brighter than the walls it mirrors, and speckled.
+
+`VICTORY_REFLECT_BOUND=<multiple>` (in `crate::ambient`, after each `CS_RayMiss`, an indirect dispatch the stand-in did not follow before): what it left is held to that multiple of the light around each point, the light the diffuse stand-in already gathers from the screen, and over it the room's light at that multiple takes its place. The water's own chain runs the same program and mirrors the sky truly; bounded, the sea near the shore went dark and green (`run-refl-bound`), so the buffer the water's resolve reads is left alone. Frame rate unchanged (12.4 against 12.1 fps median, from the save copy). The player, indoors: "way better"; other artifacts remain that are not the glossy floor. `play.ps1` sets `1`.
+
+
 ## Next steps
 
 1. Frame rate: at 1080p output the submitting thread's preparing (~60 ms) sets the frame; at native output (~100 ms a frame) the card (~80 ms of work, ~1 GB over the cut budget). Next: the refreshes and the wait for the heaps' records on the submitting thread. In the heavier street with 4 list threads the frame is about 77 ms and the card 66% busy.

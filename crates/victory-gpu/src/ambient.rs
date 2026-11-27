@@ -33,6 +33,15 @@
 //! The air of a room is lit by the same probes: without rays they hold the
 //! sky's light indoors too, a brown veil at sunset. `VICTORY_AMBIENT_AIR`
 //! bounds what the air scatters by a multiple of the light around.
+//!
+//! Reflections too: without rays every reflection ray that leaves the screen
+//! misses, and the title's `CS_RayMiss` gives it the sky. Indoors, where a
+//! ray would have found a wall, floors then mirror a blue-white sky and the
+//! denoiser averages that with the few dark screen-space hits into a frosted,
+//! speckled floor (indoor trace 2005: the raw reflections on the floor
+//! (61, 79, 103) against warm walls (77, 76, 62)). `VICTORY_REFLECT_BOUND`
+//! bounds what `CS_RayMiss` left by a multiple of the light around each
+//! point; over it, the room's light at that multiple takes its place.
 
 use std::sync::{Mutex, OnceLock};
 
@@ -51,6 +60,11 @@ pub(crate) enum Role {
     /// Adds the lamps' light to what the air scatters (the last program
     /// that writes that volume before it is summed up along the view).
     Air,
+    /// Gives reflection rays that missed what they reflect (the sky).
+    Reflect,
+    /// Resolves the water's reflections: what it reads is the water chain's
+    /// (`CS_RayMiss` runs for it too), left as it is ([`is_water`]).
+    WaterResolve,
 }
 
 /// The program's part in this, by its name in the container.
@@ -62,6 +76,11 @@ pub(crate) fn role(container: &[u8]) -> Option<Role> {
         Some(Role::Radiance)
     } else if has(b"CS_AccumulateLocalLightInscatteringVolume") {
         Some(Role::Air)
+    } else if has(b"CS_RayMiss_") {
+        // (The screen probes' own is `CS_ScreenProbe_RayMiss_`.)
+        Some(Role::Reflect)
+    } else if has(b"CS_TemporalResolve2_Water") {
+        Some(Role::WaterResolve)
     } else {
         None
     }
@@ -75,6 +94,30 @@ pub(crate) const DEPTH: (u8, u32) = (0, 464);
 pub(crate) const RADIANCE: (u8, u32) = (1, 16);
 /// Where the light the air scatters is.
 pub(crate) const AIR: (u8, u32) = (1, 32);
+/// Where `CS_RayMiss` writes the reflections (R11G11B10_FLOAT).
+pub(crate) const REFLECT: (u8, u32) = (1, 104);
+/// Where the water's resolve reads its reflections.
+pub(crate) const WATER_REFLECTIONS: (u8, u32) = (1, 104);
+
+/// The water chain's reflection images (title resources), as its resolve
+/// read them; they live from frame to frame. Open water outdoors mirrors
+/// the sky truly: bounded, it turned dark and green near the shore (runs
+/// refl-free and refl-bound).
+static WATER: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+
+pub(crate) fn note_water(resource: usize) {
+    let mut water = WATER.lock().unwrap_or_else(|e| e.into_inner());
+    if !water.contains(&resource) {
+        if water.len() >= 8 {
+            water.remove(0);
+        }
+        water.push(resource);
+    }
+}
+
+pub(crate) fn is_water(resource: usize) -> bool {
+    WATER.lock().unwrap_or_else(|e| e.into_inner()).contains(&resource)
+}
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Set {
@@ -108,6 +151,16 @@ fn air() -> f32 {
     static SET: OnceLock<f32> = OnceLock::new();
     *SET.get_or_init(|| {
         let set = std::env::var("VICTORY_AMBIENT_AIR").unwrap_or_default();
+        set.trim().parse().ok().filter(|v: &f32| v.is_finite() && *v > 0.0).unwrap_or(0.0)
+    })
+}
+
+/// The most a reflection holds, as a multiple of the light around
+/// (`VICTORY_REFLECT_BOUND=<multiple>`; unset or 0: what the title has).
+fn reflect() -> f32 {
+    static SET: OnceLock<f32> = OnceLock::new();
+    *SET.get_or_init(|| {
+        let set = std::env::var("VICTORY_REFLECT_BOUND").unwrap_or_default();
         set.trim().parse().ok().filter(|v: &f32| v.is_finite() && *v > 0.0).unwrap_or(0.0)
     })
 }
@@ -427,6 +480,23 @@ void raise(uint3 at : SV_DispatchThreadID) {
     }
 }
 #endif
+
+#ifdef REFLECT
+RWTexture2D<float3> mirrored : register(u0);
+// No brighter than a multiple (`most`) of the light around the point the
+// reflection is of; over it, the room's light at that multiple: a ray that
+// left the screen indoors would have found the room, not the sky.
+[RootSignature(RS)]
+[numthreads(8, 8, 1)]
+void bound_reflection(uint3 at : SV_DispatchThreadID) {
+    if (at.x >= width || at.y >= height) return;
+    uint2 q = min(uint2((float2(at.xy) + 0.5) / float2(width, height) * float2(PX, PY)), uint2(PX - 1, PY - 1));
+    uint at0 = (q.y * PX + q.x) * 3;
+    float3 around = max(float3(points[at0].w, points[at0 + 1].w, points[at0 + 2].w), 0.0);
+    float3 c = mirrored[at.xy];
+    if (dot(c, LUMA) > dot(around, LUMA) * most) mirrored[at.xy] = around * most;
+}
+#endif
 "#;
 
 /// Bytes of the cells' buffer and of the points'.
@@ -444,6 +514,7 @@ struct Pass {
     gather: ID3D12PipelineState,
     raise: ID3D12PipelineState,
     air: ID3D12PipelineState,
+    reflect: ID3D12PipelineState,
     cells: ID3D12Resource,
     points: ID3D12Resource,
     stats: ID3D12Resource,
@@ -476,6 +547,7 @@ fn make(device: &ID3D12Device, buffer: impl Fn(u64) -> Option<ID3D12Resource>) -
     let gather = pipeline("GATHER", s!("gather"))?;
     let raise = pipeline("RAISE", s!("raise"))?;
     let air = pipeline("AIR", s!("clear_air"))?;
+    let reflect = pipeline("REFLECT", s!("bound_reflection"))?;
     let made = |bytes| buffer(bytes).ok_or_else(windows::core::Error::empty);
     Ok(Pass {
         root: root.ok_or_else(windows::core::Error::empty)?,
@@ -485,6 +557,7 @@ fn make(device: &ID3D12Device, buffer: impl Fn(u64) -> Option<ID3D12Resource>) -
         gather,
         raise,
         air,
+        reflect,
         cells: made(CELL_BYTES)?,
         points: made(POINT_BYTES)?,
         stats: made(256)?,
@@ -551,11 +624,17 @@ pub(crate) fn after(list: &HostList, role: Role, views: &Views) -> bool {
     if role == Role::Air && (constant > 0.0 || air() == 0.0) {
         return false;
     }
-    static SAID: Mutex<u32> = Mutex::new(0);
+    if role == Role::WaterResolve || role == Role::Reflect && (constant > 0.0 || reflect() == 0.0) {
+        return false;
+    }
+    // The first two of each role: one role's lines used up a shared count
+    // and hid whether another ran.
+    static SAID: Mutex<[u32; 5]> = Mutex::new([0; 5]);
     {
         let mut said = SAID.lock().unwrap_or_else(|e| e.into_inner());
-        if *said < 4 {
-            *said += 1;
+        let n = &mut said[role as usize];
+        if *n < 2 {
+            *n += 1;
             tracing::info!(?role, size = ?views.size, level, constant, "a stand-in for the indirect light");
         }
     }
@@ -571,7 +650,7 @@ pub(crate) fn after(list: &HostList, role: Role, views: &Views) -> bool {
     words[6] = views.size[0];
     words[7] = views.size[1];
     words[8] = follow(role).to_bits();
-    words[9] = 4.0f32.to_bits();
+    words[9] = if role == Role::Reflect { reflect() } else { 4.0 }.to_bits();
     words[10] = air().to_bits();
     words[11] = u32::from(crate::lightprobe::on());
     words[12] = settle().map_or(0.0, |s| s.jump).to_bits();
@@ -602,6 +681,9 @@ pub(crate) fn after(list: &HostList, role: Role, views: &Views) -> bool {
                 KEPT.store(true, Ordering::Relaxed);
             }
             Role::Air => run(&pass.air, views.size[0].div_ceil(8), views.size[1].div_ceil(8), views.slices.div_ceil(2)),
+            Role::Reflect => run(&pass.reflect, views.size[0].div_ceil(8), views.size[1].div_ceil(8), 1),
+            // Only noted (`note_water`); nothing is recorded for it.
+            Role::WaterResolve => {}
             Role::Resolve => {
                 if constant == 0.0 {
                     run(&pass.place, 8, 9, 1);
@@ -633,6 +715,9 @@ mod tests {
         assert_eq!(role(b"..CS_ScreenProbes_TemporalResolve_a911b49c_Wrapped.."), Some(Role::Resolve));
         assert_eq!(role(b"..CS_CacheScreenSpaceRadiance_eed2fc35.."), Some(Role::Radiance));
         assert_eq!(role(b"CS_AccumulateLocalLightInscatteringVolume_7e2f5eef"), Some(Role::Air));
+        assert_eq!(role(b"sr_tracing:CS_RayMiss_de6b91a6_Wrapped"), Some(Role::Reflect));
+        assert_eq!(role(b"CS_ScreenProbe_RayMiss_80a88544_Wrapped"), None);
+        assert_eq!(role(b"sr_denoising:CS_TemporalResolve2_Water_357e0818_Wrapped"), Some(Role::WaterResolve));
         assert_eq!(role(b"CS_TemporalResolve"), None);
     }
 
