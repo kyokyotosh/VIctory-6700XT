@@ -212,9 +212,20 @@ The cause: with no structures every reflection ray that leaves the screen misses
 `VICTORY_REFLECT_BOUND=<multiple>` (in `crate::ambient`, after each `CS_RayMiss`, an indirect dispatch the stand-in did not follow before): what it left is held to that multiple of the light around each point, the light the diffuse stand-in already gathers from the screen, and over it the room's light at that multiple takes its place. The water's own chain runs the same program and mirrors the sky truly; bounded, the sea near the shore went dark and green (`run-refl-bound`), so the buffer the water's resolve reads is left alone. Frame rate unchanged (12.4 against 12.1 fps median, from the save copy). The player, indoors: "way better"; other artifacts remain that are not the glossy floor. `play.ps1` sets `1`.
 
 
+## The send thread (VICTORY_SEND_THREAD, 2026-11-27)
+
+Ported from VIctory-NVIDIA-RT (`e994b90`, `cdef339`; branch `send-thread`): a submission sent ahead hands its ExecuteCommandLists and fence Signal to a thread of its own, and the submitting thread goes on to the next one. The sync list of copies in the card's memory, the relay's fetch on the host queue and the present wait for that thread first. Four runs from the 09:56 save copy (`target\saves-snapshot`, restored before each), `-Console series-s`, about 330 s of world each:
+
+| | Runs | Median fps | ≥10 fps | Frame | Submitting thread busy | Sending on it | Title waits at presents | Card busy |
+|---|---|---|---|---|---|---|---|---|
+| off | `run-st-off-a`, `-off-b` | 13.3, 13.1 | 99%, 98% | 75.2, 76.0 ms | 63.3, 62.9 ms | 1.0 ms | 25.4, 26.3 ms | 65% |
+| on | `run-st-on-a`, `-on-b` | 13.2, 13.0 | 100%, 99% | 75.9, 77.1 ms | 63.4, 62.1 ms | 0.1 ms | 22.4, 25.8 ms | 65% |
+
+With it on, the thread spent 1.3–1.5 ms a frame sending, nobody waited for it measurably (0.0 ms), no submission arrived out of order, and the device was kept. No frame-rate change: sending was only 1 ms of the submitting thread's 63 ms here. The refreshes (21–23 ms) are the larger part. The switch stays off; the refresh pieces build on it.
+
 ## Next steps
 
-1. Frame rate: at 1080p output the submitting thread's preparing (~60 ms) sets the frame; at native output (~100 ms a frame) the card (~80 ms of work, ~1 GB over the cut budget). Next: the refreshes and the wait for the heaps' records on the submitting thread. In the heavier street with 4 list threads the frame is about 77 ms and the card 66% busy.
+1. Frame rate: at 1080p output the submitting thread's preparing (~60 ms) sets the frame; at native output (~100 ms a frame) the card (~80 ms of work, ~1 GB over the cut budget). Next: the refreshes and the wait for the heaps' records on the submitting thread. In the heavier street with 4 list threads the frame is about 77 ms and the card 66% busy. The send thread changed nothing (above); next the refresh set (`VICTORY_REFRESH_SET`).
 2. The card's memory runs slightly over the cut budget late in runs (10,077 / 9,997 MB); keep an eye on the GPU time if it creeps up.
 3. Fix the id 646 / id 538 validation errors separately.
 
