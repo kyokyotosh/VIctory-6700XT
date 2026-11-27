@@ -74,6 +74,7 @@ use windows::Win32::Graphics::Direct3D12::*;
 
 use crate::descriptor::host::HostHeap;
 use crate::host::{HostList, host};
+use crate::host::sets::{CopySet, Member};
 use crate::shadow::Shadow;
 
 /// Copies that can be numbered (the run of heap slots is one longer).
@@ -179,6 +180,9 @@ struct Memory {
     /// Pages asked for this frame that are not the title's memory.
     refused: std::collections::HashSet<u64>,
     stats: Stats,
+    /// The copies as one refresh step (`VICTORY_REFRESH_SET`), made for the
+    /// number of copies it holds.
+    set: Option<Arc<CopySet>>,
     #[cfg(feature = "diagnostics")]
     dump: dump::Dump,
     #[cfg(feature = "diagnostics")]
@@ -254,6 +258,7 @@ impl Memory {
             frame: u64::MAX,
             refused: Default::default(),
             stats: Stats::default(),
+            set: None,
             #[cfg(feature = "diagnostics")]
             dump: Default::default(),
             #[cfg(feature = "diagnostics")]
@@ -743,13 +748,58 @@ impl Memory {
 
     /// Every copy is brought up to date when `list` is submitted, after what
     /// it deferred so far (once until a copy of the title's intervenes).
-    fn bring_up(&self, list: &HostList) {
+    /// With `VICTORY_REFRESH_SET` the copies are one step, `Step::RefreshSet`,
+    /// which stands for the same refreshes in the same order.
+    fn bring_up(&mut self, list: &HostList) {
         let (start, len) = self.directory.1.span();
         self.directory.1.refresh(list, start, len);
+        if crate::host::sets::on() {
+            let set = self.copy_set();
+            list.defer_refresh_set(&set);
+            return;
+        }
         for shadow in &self.copies {
             let (start, len) = shadow.span();
             shadow.refresh(list, start, len);
         }
+    }
+
+    /// The copies as refresh ranges, in copy order (what `bring_up` pushes
+    /// one by one without the set).
+    fn set_members(&self) -> Vec<Member> {
+        self.copies
+            .iter()
+            .map(|shadow| {
+                // `Shadow::refresh` clamps the length to the span, and the
+                // address is its start: the span is the range.
+                let (start, len) = shadow.span();
+                Member { shadow: shadow.clone(), at: start as usize, len: len as usize }
+            })
+            .collect()
+    }
+
+    /// The set of copies a list brings up, kept while the number of copies
+    /// stays the same (copies are only pushed). With
+    /// `VICTORY_REFRESH_SET_CHECK=1` it is rebuilt and compared each time.
+    fn copy_set(&mut self) -> Arc<CopySet> {
+        if let Some(set) = &self.set
+            && set.copies() == self.copies.len()
+        {
+            if !crate::host::sets::check() {
+                return set.clone();
+            }
+            let fresh = self.set_members();
+            let old = set.members();
+            let same = fresh.len() == old.len()
+                && fresh.iter().zip(old).all(|(a, b)| Arc::ptr_eq(&a.shadow, &b.shadow) && a.at == b.at && a.len == b.len);
+            if same {
+                return set.clone();
+            }
+            crate::host::sets::mismatch("a refresh set was out of date for the copies it was made for");
+        }
+        let set = Arc::new(CopySet::new(self.copies.len(), self.set_members()));
+        self.set = Some(set.clone());
+        set
     }
 
     /// Every ten seconds or so, what was used.

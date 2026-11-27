@@ -339,17 +339,16 @@ pub(super) fn reads(runs: &[&HostList]) {
     let mut crossed = CROSSED.lock().unwrap_or_else(|e| e.into_inner());
     for list in runs {
         for step in &list.deferred().copies {
-            let Step::Refresh(shadow, at, len) = step else {
-                continue;
-            };
-            let (from, to) = (*at, *at + *len);
-            if !touches(&all, from, to) {
-                continue;
-            }
-            for (writer, a, b) in &writes {
-                if *a < to && from < *b && !std::sync::Arc::ptr_eq(writer, shadow) {
-                    let e = crossed.1.entry((shadow.span(), writer.span())).or_default();
-                    *e = (e.0 + 1, (*a).max(from), (*b).min(to));
+            for (shadow, from, len) in super::sets::every_refresh(step) {
+                let to = from + len;
+                if !touches(&all, from, to) {
+                    continue;
+                }
+                for (writer, a, b) in &writes {
+                    if *a < to && from < *b && !std::sync::Arc::ptr_eq(writer, shadow) {
+                        let e = crossed.1.entry((shadow.span(), writer.span())).or_default();
+                        *e = (e.0 + 1, (*a).max(from), (*b).min(to));
+                    }
                 }
             }
         }
@@ -387,7 +386,7 @@ pub(super) fn order(runs: &[&HostList]) {
     for list in runs {
         for step in &list.deferred().copies {
             match step {
-                Step::Refresh(_, at, len) => read.push((*at, *at + *len)),
+                Step::Refresh(..) | Step::RefreshSet(_) => read.extend(super::sets::every_refresh(step).map(|(_, at, len)| (at, at + len))),
                 Step::GpuWrite(_, at, len) => written.push((*at, *at + *len)),
                 &Step::Copy(dst, src, len) => {
                     let mut say = |what: &'static str, range: (usize, usize)| {

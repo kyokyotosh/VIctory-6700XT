@@ -197,9 +197,11 @@ pub(super) fn copied_read(copies: &[Writer], runs: &[&HostList]) -> bool {
     }
     runs.iter().any(|list| {
         list.deferred().copies.iter().any(|step| match step {
-            Step::Refresh(shadow, at, len) => copies
-                .iter()
-                .any(|w| w.from < *at + *len && *at < w.to && w.shadow.as_ref().is_none_or(|s| !Arc::ptr_eq(s, shadow))),
+            Step::Refresh(..) | Step::RefreshSet(_) => sets::every_refresh(step).any(|(shadow, at, len)| {
+                copies
+                    .iter()
+                    .any(|w| w.from < at + len && at < w.to && w.shadow.as_ref().is_none_or(|s| !Arc::ptr_eq(s, shadow)))
+            }),
             Step::Host(_, (from, to)) => copies.iter().any(|w| w.from < *to && *from < w.to),
             _ => false,
         })
@@ -419,6 +421,19 @@ fn does_of(written: &[(usize, usize)], runs: &[&HostList]) -> (Vec<Does>, Vec<(u
     let mut steps = Vec::new();
     for list in runs {
         for (i, step) in list.deferred().copies.iter().enumerate() {
+            // A set is every member, every time: the plan is about the
+            // order of refreshes against copies into title memory.
+            if let Step::RefreshSet(set) = step {
+                for m in set.members() {
+                    does.push(Does::Refresh {
+                        shadow: Arc::as_ptr(&m.shadow) as usize,
+                        from: m.at,
+                        to: m.at + m.len,
+                    });
+                    steps.push((std::ptr::from_ref::<HostList>(list) as usize, i));
+                }
+                continue;
+            }
             does.push(match step {
                 &Step::Copy(dst, src, len) => Does::Copy {
                     dst,
@@ -448,7 +463,7 @@ fn does_of(written: &[(usize, usize)], runs: &[&HostList]) -> (Vec<Does>, Vec<(u
                 },
                 Step::Run(_) => Does::Run,
                 Step::Placed(p) => Does::Placed { dst: p.dst, src: p.src, len: p.len },
-                Step::GpuWrite(..) | Step::Host(..) => continue,
+                Step::RefreshSet(_) | Step::GpuWrite(..) | Step::Host(..) => continue,
             });
             steps.push((std::ptr::from_ref::<HostList>(list) as usize, i));
         }

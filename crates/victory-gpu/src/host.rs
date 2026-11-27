@@ -2454,6 +2454,10 @@ enum Step {
     /// A title buffer copy that the list does on the card ([`place`]): what
     /// is done on the CPU for it.
     Placed(place::Placed),
+    /// The refreshes of every member of the set, as `Step::Refresh(shadow,
+    /// at, len)` for each in member order would have been
+    /// (`VICTORY_REFRESH_SET`, host/sets.rs).
+    RefreshSet(std::sync::Arc<sets::CopySet>),
 }
 
 /// What a list does on the CPU when it is submitted: copies between host
@@ -3237,7 +3241,7 @@ fn blocked_by(written: &[(usize, usize)], runs: &[&HostList], count: bool) -> Op
                         return Some(WHY_READ);
                     }
                 },
-                Step::Refresh(..) | Step::GpuWrite(..) | Step::Host(..) => {}
+                Step::Refresh(..) | Step::RefreshSet(_) | Step::GpuWrite(..) | Step::Host(..) => {}
             }
         }
     }
@@ -3270,18 +3274,20 @@ fn stale_under_flights(runs: &[&HostList]) -> Vec<(std::sync::Arc<crate::shadow:
     // while this runs): a frame has 20,000 refreshes of some 4,500 copies.
     let mut places: ByCopy<Option<usize>> = ByCopy::default();
     let scanning = std::time::Instant::now();
+    // A set that comes again adds nothing to the spans.
+    let mut once = sets::Once::default();
     for list in runs {
         for step in &list.deferred().copies {
-            if let Step::Refresh(shadow, address, len) = step {
+            for (shadow, address, len) in sets::refreshes(step, &mut once) {
                 let place = places.entry(Arc::as_ptr(shadow) as usize).or_insert_with(|| {
                     shadow.writes_pending().then(|| {
-                        spans.push((shadow.clone(), *address, *address + *len));
+                        spans.push((shadow.clone(), address, address + len));
                         spans.len() - 1
                     })
                 });
                 if let Some(i) = *place {
                     let s = &mut spans[i];
-                    (s.1, s.2) = (s.1.min(*address), s.2.max(*address + *len));
+                    (s.1, s.2) = (s.1.min(address), s.2.max(address + len));
                 }
             }
         }
@@ -3938,6 +3944,7 @@ mod place;
 pub(crate) mod rec;
 mod segments;
 mod send;
+pub(crate) mod sets;
 mod upq;
 pub(crate) use send::{goes_as_words, words_under};
 #[cfg(feature = "diagnostics")]
@@ -5870,15 +5877,16 @@ impl Host {
         // (`VICTORY_ASK_ONCE`): per copy, the span of its refreshed ranges.
         if crate::watch::once() {
             let mut spans: ByCopy<(usize, usize)> = ByCopy::default();
+            // A set that comes again adds nothing to the spans.
+            let mut once = sets::Once::default();
             for list in runs {
                 for step in &list.deferred().copies {
-                    if let Step::Refresh(shadow, address, len) = step
-                        && shadow.asked_ahead()
-                    {
-                        let span = spans
-                            .entry(std::sync::Arc::as_ptr(shadow) as usize)
-                            .or_insert((*address, *address + *len));
-                        *span = (span.0.min(*address), span.1.max(*address + *len));
+                    for (shadow, address, len) in sets::refreshes(step, &mut once) {
+                        if !shadow.asked_ahead() {
+                            continue;
+                        }
+                        let span = spans.entry(std::sync::Arc::as_ptr(shadow) as usize).or_insert((address, address + len));
+                        *span = (span.0.min(address), span.1.max(address + len));
                     }
                 }
             }
@@ -7258,6 +7266,18 @@ impl HostList {
         }
     }
 
+    /// Brings every member of `set` up to date when the list is submitted
+    /// ([`Step::RefreshSet`], `VICTORY_REFRESH_SET`). Not noted in
+    /// `Deferred::refreshed`: memory.rs pushes it once per list and count of
+    /// copies, and a plain refresh of one of its ranges that someone else
+    /// pushes only repeats what the set does, which a refresh tolerates.
+    pub(crate) fn defer_refresh_set(&self, set: &std::sync::Arc<sets::CopySet>) {
+        if set.members().is_empty() {
+            return;
+        }
+        self.deferred().copies.push(Step::RefreshSet(set.clone()));
+    }
+
     /// Shaders of the list write `[address, address + len)` of a buffer's
     /// host copy: copied back into title memory once the list has run.
     /// Declared once until the list next writes title memory (but with
@@ -7709,6 +7729,10 @@ impl HostList {
                     batch.add(shadow, *address, *len);
                     continue;
                 }
+                Step::RefreshSet(set) => {
+                    batch.add_set(set);
+                    continue;
+                }
                 Step::Run(work) | Step::Host(work, _) => {
                     batch.fill();
                     #[cfg(feature = "diagnostics")]
@@ -7924,6 +7948,7 @@ fn split_line(frames: f64) {
         h[2],
         aside::WAITED.swap(0, Ordering::Relaxed) as f64 / 1e3 / frames,
     );
+    sets::line(frames);
 }
 
 /// Whether a submission's refreshes of host copies run on several threads,
@@ -8004,6 +8029,9 @@ struct Batch {
     /// `ahead` holds everything the submission refreshes
     /// ([`Batch::refresh_front`]).
     front: bool,
+    /// What the submission has done of each refresh set, and what happened
+    /// to its copies since (`VICTORY_REFRESH_SET`, host/sets.rs).
+    sets: sets::Seen,
 }
 
 /// Whether the copies that a submission's shaders write are brought up to
@@ -8108,22 +8136,26 @@ fn list_front(steps: &[Step], textures: bool) -> ListFront {
     let mut shadows: Vec<(usize, std::sync::Arc<crate::shadow::Shadow>)> = Vec::new();
     let mut staged: Vec<std::sync::Arc<crate::texture::Staging>> = Vec::new();
     let mut refreshed: ByCopy<()> = ByCopy::default();
-    let touches = steps.iter().filter_map(|step| match step {
-        Step::Refresh(shadow, from, len) => {
-            let key = std::sync::Arc::as_ptr(shadow) as usize;
-            if refreshed.insert(key, ()).is_none() {
-                shadows.push((key, shadow.clone()));
+    // (A set twice in one list adds nothing to its spans.)
+    let mut once = sets::Once::default();
+    let mut touches = Vec::new();
+    for step in steps {
+        match step {
+            Step::Refresh(..) | Step::RefreshSet(_) => {
+                for (shadow, from, len) in sets::refreshes(step, &mut once) {
+                    let key = std::sync::Arc::as_ptr(shadow) as usize;
+                    if refreshed.insert(key, ()).is_none() {
+                        shadows.push((key, shadow.clone()));
+                    }
+                    touches.push(Touch::Refresh(key, from, from + len));
+                }
             }
-            Some(Touch::Refresh(key, *from, *from + *len))
+            Step::GpuWrite(shadow, ..) => touches.push(Touch::Write(std::sync::Arc::as_ptr(shadow) as usize)),
+            Step::Texture(staging) if textures => staged.push(staging.clone()),
+            _ => {}
         }
-        Step::GpuWrite(shadow, ..) => Some(Touch::Write(std::sync::Arc::as_ptr(shadow) as usize)),
-        Step::Texture(staging) if textures => {
-            staged.push(staging.clone());
-            None
-        }
-        _ => None,
-    });
-    let copies = fold_touches(touches);
+    }
+    let copies = fold_touches(touches.into_iter());
     ListFront { copies, shadows, textures: staged }
 }
 
@@ -8413,6 +8445,46 @@ impl Batch {
         }
     }
 
+    /// The members of `set` that are due again in this submission
+    /// ([`sets::Seen::due`]) are added, as the refreshes of each would have
+    /// been. With `VICTORY_REFRESH_SET_CHECK=1` every member left out is
+    /// also looked at: one that would still copy something means the set
+    /// left out what the plain refreshes would have done; it is added after
+    /// all, and counted.
+    fn add_set(&mut self, set: &std::sync::Arc<sets::CopySet>) {
+        let due = self.sets.due(set);
+        let members = set.members();
+        if sets::check() {
+            let mut done = vec![false; members.len()];
+            for &i in &due {
+                done[i] = true;
+            }
+            for (i, m) in members.iter().enumerate() {
+                if !done[i] && self.would_copy(m) {
+                    sets::mismatch("a refresh set left out a member that was not done");
+                    self.add(&m.shadow, m.at, m.len);
+                }
+            }
+        }
+        for i in due {
+            let m = &members[i];
+            self.add(&m.shadow, m.at, m.len);
+        }
+    }
+
+    /// Whether adding the member again would find something to copy, which
+    /// is what the plain refresh of it would have found: not if `ahead` or a
+    /// pending refresh holds a range around it. A copy that is not
+    /// write-watched copies whole every time, and one under shaders' writes
+    /// is refreshed around them: neither is judged here.
+    fn would_copy(&self, m: &sets::Member) -> bool {
+        let key = std::sync::Arc::as_ptr(&m.shadow) as usize;
+        let end = m.at + m.len;
+        let covered = self.ahead.get(&key).is_some_and(|&(from, to)| from <= m.at && end <= to)
+            || self.index.get(&key).is_some_and(|&at| self.refreshes.get(at).is_some_and(|r| r.1 <= m.at && end <= r.2));
+        !m.shadow.unwatched() && !m.shadow.writes_pending_in(m.at, end) && !covered && !m.shadow.nothing_new(m.at, m.len)
+    }
+
     /// Before shaders are given a range of `shadow`'s copy: its pending
     /// refresh is done, the others stay pending.
     fn flush_one(&mut self, shadow: &std::sync::Arc<crate::shadow::Shadow>) {
@@ -8421,6 +8493,11 @@ impl Batch {
         if !self.front {
             self.ahead.remove(&(std::sync::Arc::as_ptr(shadow) as usize));
         }
+        // What the shaders write makes every later occurrence of a set add
+        // this copy again, as the plain refreshes did, and anything that
+        // overlaps it.
+        let (s, l) = shadow.span();
+        self.sets.dropped(s as usize, (s + l) as usize);
         let Some(at) = self.index.remove(&(std::sync::Arc::as_ptr(shadow) as usize)) else {
             return;
         };
@@ -8466,6 +8543,7 @@ impl Batch {
     fn title_written(&mut self) {
         self.flush();
         self.ahead.clear();
+        self.sets.dropped_all();
         self.textures.clear();
     }
 
@@ -8515,20 +8593,27 @@ impl Batch {
         }
         let mut copies: ByCopy<std::sync::Arc<crate::shadow::Shadow>> = ByCopy::default();
         let mut touches = Vec::new();
+        // A set already taken in the same part adds nothing new to the
+        // spans; a new part takes it again, because what a part refreshes of
+        // a copy given to shaders in an earlier part widens its span.
+        let mut once = sets::Once::default();
         for (n, list) in runs.iter().enumerate() {
             if parts.contains(&n) {
                 touches.push(Touch::Part);
+                once.clear();
             }
             let mut last = 0;
             for step in &list.deferred().copies {
                 match step {
-                    Step::Refresh(shadow, at, len) => {
-                        let key = std::sync::Arc::as_ptr(shadow) as usize;
-                        if key != last {
-                            copies.entry(key).or_insert_with(|| shadow.clone());
-                            last = key;
+                    Step::Refresh(..) | Step::RefreshSet(_) => {
+                        for (shadow, at, len) in sets::refreshes(step, &mut once) {
+                            let key = std::sync::Arc::as_ptr(shadow) as usize;
+                            if key != last {
+                                copies.entry(key).or_insert_with(|| shadow.clone());
+                                last = key;
+                            }
+                            touches.push(Touch::Refresh(key, at, at + len));
                         }
-                        touches.push(Touch::Refresh(key, *at, *at + *len));
                     }
                     Step::GpuWrite(shadow, ..) => touches.push(Touch::Write(std::sync::Arc::as_ptr(shadow) as usize)),
                     Step::Texture(staging) if wide_textures() => {
@@ -8622,19 +8707,23 @@ impl Batch {
     fn refresh_ahead(&mut self, runs: &[&HostList], taken: impl Fn(&HostList, usize) -> bool) {
         let mut copies: ByCopy<std::sync::Arc<crate::shadow::Shadow>> = ByCopy::default();
         let mut touches = Vec::new();
+        // A set that comes again adds no touch.
+        let mut once = sets::Once::default();
         'steps: for list in runs {
             for (i, step) in list.deferred().copies.iter().enumerate() {
-                touches.push(match step {
-                    Step::Refresh(shadow, at, len) => {
-                        let key = std::sync::Arc::as_ptr(shadow) as usize;
-                        copies.entry(key).or_insert_with(|| shadow.clone());
-                        Touch::Refresh(key, *at, *at + *len)
+                match step {
+                    Step::Refresh(..) | Step::RefreshSet(_) => {
+                        for (shadow, at, len) in sets::refreshes(step, &mut once) {
+                            let key = std::sync::Arc::as_ptr(shadow) as usize;
+                            copies.entry(key).or_insert_with(|| shadow.clone());
+                            touches.push(Touch::Refresh(key, at, at + len));
+                        }
                     }
-                    Step::GpuWrite(shadow, ..) => Touch::Write(std::sync::Arc::as_ptr(shadow) as usize),
-                    Step::Copy(..) if taken(list, i) => Touch::Nothing,
+                    Step::GpuWrite(shadow, ..) => touches.push(Touch::Write(std::sync::Arc::as_ptr(shadow) as usize)),
+                    Step::Copy(..) if taken(list, i) => touches.push(Touch::Nothing),
                     Step::Copy(..) | Step::Run(_) | Step::Placed(_) => break 'steps,
-                    _ => Touch::Nothing,
-                });
+                    _ => touches.push(Touch::Nothing),
+                }
             }
         }
         let due: Vec<_> = written_spans(touches.into_iter())
