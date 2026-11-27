@@ -192,6 +192,17 @@ Every run from one copy of the saves (restored before each), `-Console series-s`
 
 The four 8-thread runs are two of the build before the port of avatarmanz's five items (`dcdae92`) and two that were meant to be of the port but ran the earlier binary (a stray `CARGO_TARGET_DIR`). The `run-new` runs are of the port with the new default: against the earlier build at 4 threads, no change in frame rate (13.0 and 13.3 against 13.1 and 12.9).
 
+## The screen probes' ray activation without rays (2026-11-27)
+
+Belobug's fork leaves `CS_ScreenProbes_ActivateRays` out while the structure builder is off (VIctory-Belobug-AMD `6986a57`): there, with no rays behind it, the picture lost light, shadows and reflections. Ported behind a switch and tried here from the same save copy:
+
+| | Runs | Median fps | ≥10 fps |
+|---|---|---|---|
+| runs (as before) | `run-new-a`, `-new-b` | 13.0, 13.3 | 97%, 98% |
+| left out | `run-skip-a`, `-skip-b` | 13.4, 13.4 | 97%, 99% |
+
+Captured at the same moments after the world loads (`run-shot-off`, `run-shot-skip`), left out is darker where light bounces: the house walls and the shade under its deck in the opening view, the shade under the gazebo later. Here the pass feeds the indirect light instead of spoiling it, and costs nothing measurable, so it stays in and the port was removed.
+
 ## Next steps
 
 1. Frame rate: at 1080p output the submitting thread's preparing (~60 ms) sets the frame; at native output (~100 ms a frame) the card (~80 ms of work, ~1 GB over the cut budget). Next: the refreshes and the wait for the heaps' records on the submitting thread. In the heavier street with 4 list threads the frame is about 77 ms and the card 66% busy.

@@ -104,23 +104,19 @@ pub(crate) fn kept() -> [u64; 7] {
 }
 
 /// The program's name in its container, as the title's tools wrote it
-/// (`CS_ScreenProbes_TemporalResolve_a911b49c_Wrapped`): the first
-/// identifier that starts with a stage's two letters and `_`.
+/// (`CS_ScreenProbes_TemporalResolve_a911b49c_Wrapped`): the identifier
+/// that ends in `_Wrapped`, from its stage's two letters and `_` on.
 #[cfg(feature = "diagnostics")]
 fn program_name(bytes: &[u8]) -> Option<&str> {
+    const END: &[u8] = b"_Wrapped";
     let word = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
-    (1..bytes.len().saturating_sub(8)).find_map(|i| {
-        let at = &bytes[i..];
-        let starts = matches!(at[0], b'C' | b'P' | b'V' | b'M' | b'A' | b'H' | b'D' | b'G')
-            && at[1] == b'S'
-            && at[2] == b'_'
-            && !word(bytes[i - 1]);
-        if !starts {
-            return None;
-        }
-        let len = at.iter().take_while(|&&b| word(b)).count();
-        (len >= 8).then(|| std::str::from_utf8(&at[..len]).ok()).flatten()
-    })
+    let end = bytes.windows(END.len()).position(|w| w == END)? + END.len();
+    let start = end - bytes[..end].iter().rev().take_while(|&&b| word(b)).count();
+    let ident = &bytes[start..end];
+    let from = ident.windows(3).position(|w| {
+        matches!(w[0], b'C' | b'P' | b'V' | b'M' | b'A' | b'H' | b'D' | b'G') && w[1] == b'S' && w[2] == b'_'
+    })?;
+    std::str::from_utf8(&ident[from..]).ok()
 }
 
 /// The shared container for `bytes`.
