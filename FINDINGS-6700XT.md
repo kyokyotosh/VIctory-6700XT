@@ -234,7 +234,9 @@ Two thirds of the texture work gone, the changes found the same; the frame rate 
 | off | `run-hs-off-a`, `-off-b` | 13.1, 13.2 | 76.3, 75.6 ms | 65.0, 64.5 ms | 23.2, 22.3 ms | 9.8, 9.9 ms (at the close) | 300, 298 ms |
 | on | `run-hs-on-a`, `-on-b` | 13.7, 13.6 | 72.7, 73.5 ms | 63.1, 62.7 ms | 20.3, 20.4 ms | 0.0 ms (at the submission) | 287, 287 ms |
 
-By the time the submitting thread comes to the list the pass is done: nobody waits. Frame 3 ms shorter, and every measure moved the same way in both pairs; the medians of the first 45 samples are closer (13.35, 13.45 against 13.5, 13.5). The picture was not compared.
+By the time the submitting thread comes to the list the pass is done: nobody waits. Frame 3 ms shorter, and every measure moved the same way in both pairs; the medians of the first 45 samples are closer (13.35, 13.45 against 13.5, 13.5).
+
+Picture: two runs from the same save copy, off and on (`run-cap-off`, `run-cap-on`, `VICTORY_CAPTURE_WORLD=1`: every 8th frame after the world's first, `target\cap\`), compared at the same frames after it. The same scene and the same look; what differs is the idle player's pose and the idle camera, which drift apart from run to run. No frame of either has more than 12% black pixels, none any magenta, and side by side (`target\cap\cmp\`) nothing is missing or broken. `play.ps1` now sets `VICTORY_HEAP_PASS_AT_SUBMIT=1`; the texture backoff stays off.
 
 ## Next steps
 
