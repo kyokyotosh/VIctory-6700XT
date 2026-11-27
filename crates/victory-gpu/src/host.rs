@@ -3935,6 +3935,7 @@ pub(crate) mod indirects;
 #[cfg(feature = "diagnostics")]
 mod panel;
 mod place;
+mod probe;
 pub(crate) mod rec;
 mod segments;
 mod send;
@@ -7924,6 +7925,7 @@ fn split_line(frames: f64) {
         h[2],
         aside::WAITED.swap(0, Ordering::Relaxed) as f64 / 1e3 / frames,
     );
+    probe::line(frames);
 }
 
 /// Whether a submission's refreshes of host copies run on several threads,
@@ -8590,7 +8592,11 @@ impl Batch {
         }
         #[cfg(feature = "diagnostics")]
         FLUSHES[3].fetch_add(spans.len() as u64, Ordering::Relaxed);
-        crate::shadow::wide_each(spans.len() + due.len(), move |i| {
+        // A few copies, and no texture or only light ones (the latter with
+        // VICTORY_REFRESH_PROBE_TEXTURES): tried here first ([`probe`]).
+        // Taken before the closure moves `due`.
+        let small = !many && (due.is_empty() || probe::textures_small(&due, spans.len()));
+        probe::spread(spans.len() + due.len(), small, move |i| {
             // The textures first: they are the longer pieces.
             let Some(i) = i.checked_sub(due.len()) else {
                 due[i].refresh();
@@ -8648,7 +8654,8 @@ impl Batch {
         let began = std::time::Instant::now();
         let started = std::time::Instant::now();
         let before = PREPARING[0].load(Ordering::Relaxed);
-        crate::shadow::wide_each(due.len(), move |i| {
+        let small = due.len() <= 256;
+        probe::spread(due.len(), small, move |i| {
             let (shadow, from, to) = &due[i];
             if !shadow.nothing_new(*from, *to - *from) {
                 Self::update(shadow, *from, *to);
@@ -8769,7 +8776,10 @@ impl Batch {
             if light {
                 // A number to a free thread, not a job to each copy.
                 let refreshes = std::mem::take(&mut self.refreshes);
-                crate::shadow::wide_each(refreshes.len(), move |i| {
+                // Up to FEW copies (the retain above has run): tried here
+                // first ([`probe`]); the heap's thousands are not.
+                let small = refreshes.len() <= FEW && !beside;
+                probe::spread(refreshes.len(), small, move |i| {
                     let (shadow, from, to) = &refreshes[i];
                     if (refreshes.len() > FEW || beside) && shadow.nothing_new(*from, *to - *from) {
                         #[cfg(feature = "diagnostics")]

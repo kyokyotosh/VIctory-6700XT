@@ -1219,6 +1219,17 @@ impl Staging {
         *self.holds.lock().unwrap_or_else(|e| e.into_inner()) = hash.map(|hash| (self.first, hash));
     }
 
+    /// Whether `refresh` of this texture is quick: it reads at most `limit`
+    /// bytes of title memory, or it was made for one upload and read already
+    /// (`refresh` returns at once). Never blocks: a held `last` means another
+    /// thread is refreshing this texture, which is not quick to wait on.
+    pub(crate) fn cheap(&self, limit: usize) -> bool {
+        let Ok(last) = self.last.try_lock() else {
+            return false;
+        };
+        self.read <= limit || self.once.load(std::sync::atomic::Ordering::Relaxed) && last.hash.is_some()
+    }
+
     /// Detiles the texture memory into the staging buffer if it changed
     /// since the last time (and is mapped at all).
     pub(crate) fn refresh(&self) {
