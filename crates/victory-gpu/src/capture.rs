@@ -2,7 +2,8 @@
 //! with `VICTORY_CAPTURE=<folder>`, every frame whose number is a power of
 //! two (the frames the log reports) is saved as `frame-<n>.png`, at half
 //! size. Only in builds with diagnostics. F9, with the title's window in
-//! front, traces the frame after the next as `VICTORY_CAPTURE_FRAMES` does.
+//! front, traces the three frames after the next as `VICTORY_CAPTURE_FRAMES`
+//! does.
 
 use std::path::PathBuf;
 
@@ -49,12 +50,19 @@ pub(crate) fn listed(n: u64) -> bool {
     let first = WORLD.load(std::sync::atomic::Ordering::Relaxed);
     let after = n.wrapping_sub(first);
     named
-        || n == ASKED.load(std::sync::atomic::Ordering::Relaxed)
+        || n.wrapping_sub(ASKED.load(std::sync::atomic::Ordering::Relaxed)) < ASKED_FRAMES
         || first != u64::MAX && ([2, 6, 30, 80].contains(&after) || also.contains(&after))
 }
 
-/// The frame F9 asked for ([`frame_drew`]); `u64::MAX`: none.
+/// The first frame F9 asked for ([`frame_drew`]); `u64::MAX`: none.
 static ASKED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+
+/// How many frames F9 traces from [`ASKED`] on. The title records a frame's
+/// lists while the one before is still being presented, and an operation
+/// goes to the file of the frame being presented next: one frame number
+/// caught 1,500-2,000 of a frame's operations (indoor traces 2005 and 2328),
+/// two in a row the whole frame.
+const ASKED_FRAMES: u64 = 3;
 
 /// F9 went down since the last look, with one of our windows in front (as
 /// the panel's F3).
@@ -152,10 +160,10 @@ pub(crate) fn frame_drew(frame: u64, drawn: u64) {
     use std::sync::atomic::Ordering::Relaxed;
     static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let before = LAST.swap(drawn, Relaxed);
-    // F9: the frame after the next, whose recording has not begun yet.
+    // F9: from the frame after the next, whose recording has not begun yet.
     if folder().is_some() && f9_pressed() {
         ASKED.store(frame + 2, Relaxed);
-        tracing::info!(frame = frame + 2, "F9: this frame is traced and its targets dumped");
+        tracing::info!(from = frame + 2, frames = ASKED_FRAMES, "F9: these frames are traced and their targets dumped");
     }
     if world_on()
         && drawn.saturating_sub(before) >= 500
