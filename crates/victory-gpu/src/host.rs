@@ -3938,6 +3938,7 @@ mod place;
 pub(crate) mod rec;
 mod segments;
 mod send;
+mod send_thread;
 mod upq;
 pub(crate) use send::{goes_as_words, words_under};
 #[cfg(feature = "diagnostics")]
@@ -4663,6 +4664,12 @@ impl Host {
                         }
                     }
                     list.Close()?;
+                    // The previous submissions' lists may still be on the
+                    // way to the queue on the send thread
+                    // (`VICTORY_SEND_THREAD`), and this list must come after
+                    // them, as it always did: its bytes are newer than what
+                    // they were prepared from.
+                    send_thread::wait_idle();
                     self.queue.ExecuteCommandLists(&[Some(list.cast()?)]);
                     Ok(())
                 })()
@@ -5003,9 +5010,20 @@ impl Host {
         let waiting = std::time::Instant::now();
         // The flights the fetch runs behind: those in the line by now have
         // been given to the queue. On the copy queue, those landed here.
+        // A flight enters the line when it is handed to the send thread
+        // (`VICTORY_SEND_THREAD`), not when that has put it on the queue,
+        // so on the host queue the target is read first and the thread
+        // waited for after: every flight at or below it was handed over
+        // before, and is on the queue by then. The other way round, the
+        // fetch could claim to have run behind a flight it overtook (and a
+        // landing would skip what that writes).
         let ahead = match copy_queue {
             Some(_) => 0,
-            None => line().target,
+            None => {
+                let target = line().target;
+                send_thread::wait_idle();
+                target
+            }
         };
         // SAFETY: the list's last run was waited for by this thread; live
         // buffers (the copies are held by the plans); the fence and the
@@ -6024,19 +6042,25 @@ impl Host {
                 firsts.iter_mut().for_each(|first| *first += 1);
             }
             let cuts: Vec<usize> = parts.iter().filter_map(|&n| firsts.get(n).copied()).collect();
-            // SAFETY: closed lists; the fence is ours.
-            let signalled = unsafe {
-                let mut from = 0;
-                for to in cuts.into_iter().chain([lists.len()]) {
-                    self.queue.ExecuteCommandLists(&lists[from..to]);
-                    from = to;
-                }
-                self.queue.Signal(&self.fence, *submitted)
-            };
-            awake::sent(&self.device);
+            // The lists go to the queue, and the fence is signalled behind
+            // them, in `Job::run` (the same calls in the same order as they
+            // were made here). With `VICTORY_SEND_THREAD=1` the send thread
+            // does it while this one goes on to the flight's bookkeeping.
+            // The flight still goes into the line from `send_late` and
+            // `execute_own` after this returns, with the submission lock
+            // held, so it is in the line before the next submission looks;
+            // its fence value is not completed until the send thread has
+            // signalled it, and every wait goes by completion.
+            let job = send_thread::Job::new(lists, cuts, *submitted, card.as_ref().map_or(0, |c| c.sent_as));
             #[cfg(feature = "diagnostics")]
-            crate::timeline::sent(sending, *submitted, stamp);
-            self.card_sent();
+            let job = job.timed(sending, stamp);
+            let signalled = if send_thread::on() {
+                // The thread could not be made: sent here, as without it.
+                send_thread::hand_over(job).or_else(|mut job| job.run(self))
+            } else {
+                let mut job = job;
+                job.run(self)
+            };
             stage.next("submit: noting what is in the air");
             if let Err(e) = signalled {
                 fail(format_args!("a submission sent ahead could not be followed by a signal ({e})"));
@@ -7924,6 +7948,7 @@ fn split_line(frames: f64) {
         h[2],
         aside::WAITED.swap(0, Ordering::Relaxed) as f64 / 1e3 / frames,
     );
+    send_thread::line(frames);
 }
 
 /// Whether a submission's refreshes of host copies run on several threads,
@@ -9920,6 +9945,12 @@ impl Host {
             #[cfg(feature = "diagnostics")]
             crate::replay::record::present(texture, state);
             let mut showing = crate::timeline::span("the host's Present");
+            // The copy into the back buffer may still be on the send
+            // thread (`VICTORY_SEND_THREAD=1`, the present sent ahead), and
+            // Present puts work on the same queue: it waits until that copy
+            // is on the queue, or the copy would write a buffer the
+            // compositor already holds.
+            send_thread::wait_idle();
             let status = p.swap_chain.Present(0, DXGI_PRESENT(0));
             showing.next("the frame meter");
             #[cfg(feature = "diagnostics")]

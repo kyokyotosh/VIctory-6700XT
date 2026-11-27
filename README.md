@@ -153,6 +153,7 @@ RAM, not on this machine.
 | `VICTORY_AMBIENT_SETTLE` | How fast light settles after walking indoors (on by default, `250,3`; `0` turns it off) |
 | `VICTORY_REFLECT_BOUND=<multiple>` | Reflections that missed (the sky where a ray would have found the room) hold no more than that multiple of the light around; ends the frosted, speckled floors indoors. `play.ps1` sets `1`; `0` turns it off. Water is left alone |
 | `VICTORY_TEXTURE_STORE=1` | Converted textures kept between runs (about 8 ms a frame for now: off) |
+| `VICTORY_SEND_THREAD=1` | Submissions sent ahead go to the card's queue from a thread of their own while the submitting thread prepares the next one (from VIctory-NVIDIA-RT; off while it is measured) |
 | `VICTORY_KBM_GTA=1` | Optional GTA V PC-style keyboard and mouse mapping on the stand-in pad: `F2` or `` ` `` (`~`) toggles mouse-look and auto-hides the cursor while locked (`Esc`/`P`/focus loss unlocks and restores it), LMB/RMB = RT/LT, MMB/`C` = R3, `Shift` = A, `Space` = X, `R` = B, `F` = Y, `Tab` = LB, `Q` = RB, `Ctrl` = L3, `E` = D-pad Right, `V` = View. Tune with `VICTORY_MOUSE_SENS` (default `1.0`) and `VICTORY_MOUSE_INVERT_Y=1` (or pass via `scripts\play.ps1 -More @{VICTORY_KBM_GTA='1'}`) |
 
 ### What it changed from VIctory
