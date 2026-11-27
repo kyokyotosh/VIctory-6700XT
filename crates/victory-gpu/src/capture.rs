@@ -1,7 +1,8 @@
 //! Presented frames written to PNG files, to see what reaches the screen:
 //! with `VICTORY_CAPTURE=<folder>`, every frame whose number is a power of
 //! two (the frames the log reports) is saved as `frame-<n>.png`, at half
-//! size. Only in builds with diagnostics.
+//! size. Only in builds with diagnostics. F9, with the title's window in
+//! front, traces the frame after the next as `VICTORY_CAPTURE_FRAMES` does.
 
 use std::path::PathBuf;
 
@@ -47,7 +48,30 @@ pub(crate) fn listed(n: u64) -> bool {
     });
     let first = WORLD.load(std::sync::atomic::Ordering::Relaxed);
     let after = n.wrapping_sub(first);
-    named || first != u64::MAX && ([2, 6, 30, 80].contains(&after) || also.contains(&after))
+    named
+        || n == ASKED.load(std::sync::atomic::Ordering::Relaxed)
+        || first != u64::MAX && ([2, 6, 30, 80].contains(&after) || also.contains(&after))
+}
+
+/// The frame F9 asked for ([`frame_drew`]); `u64::MAX`: none.
+static ASKED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+
+/// F9 went down since the last look, with one of our windows in front (as
+/// the panel's F3).
+fn f9_pressed() -> bool {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_F9};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+    static DOWN: AtomicBool = AtomicBool::new(false);
+    // SAFETY: a plain query.
+    let down = unsafe { GetAsyncKeyState(i32::from(VK_F9)) } < 0;
+    if DOWN.swap(down, Ordering::Relaxed) || !down {
+        return false;
+    }
+    let mut process = 0;
+    // SAFETY: plain queries; room for the answer.
+    unsafe { GetWindowThreadProcessId(GetForegroundWindow(), &mut process) };
+    process == std::process::id()
 }
 
 /// With a capture folder, for the frames [`listed`]: `what` is added to
@@ -128,6 +152,11 @@ pub(crate) fn frame_drew(frame: u64, drawn: u64) {
     use std::sync::atomic::Ordering::Relaxed;
     static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let before = LAST.swap(drawn, Relaxed);
+    // F9: the frame after the next, whose recording has not begun yet.
+    if folder().is_some() && f9_pressed() {
+        ASKED.store(frame + 2, Relaxed);
+        tracing::info!(frame = frame + 2, "F9: this frame is traced and its targets dumped");
+    }
     if world_on()
         && drawn.saturating_sub(before) >= 500
         && WORLD.compare_exchange(u64::MAX, frame, Relaxed, Relaxed).is_ok()

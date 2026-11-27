@@ -12,6 +12,8 @@
 #               mouse buttons are the triggers (README.md, "Controllers")
 # -TextureMax   caps textures' largest side to save card memory: auto (1024, 512 from 92 % of the budget,
 #               256 from 97 %) or a size such as 1024; off by default (full detail)
+# -Trace        F9 in the game traces the frame after it: every pass in target\traces\frame-<n>-ops.txt and every
+#               texture it draws or writes as a full-size picture beside it (tens of MB a press; diagnostics build)
 # -More         other settings: -More @{VICTORY_PANEL='1'}
 # Run it from a normal window, not as administrator: the driver then keeps its shader cache elsewhere.
 param(
@@ -24,6 +26,7 @@ param(
     [ValidateSet('diag', 'release')][string]$Build = 'diag',
     [switch]$PadLog,
     [switch]$Kbm,
+    [switch]$Trace,
     [string]$TextureMax,
     [hashtable]$More = @{}
 )
@@ -45,6 +48,12 @@ if ($Console -eq 'series-s') { $settings.VICTORY_UPSCALER = '6' }
 if ($PadLog) { $settings.VICTORY_PS_PADS_RAW = '1' }
 if ($Kbm) { $settings.VICTORY_KBM_GTA = '1' }
 if ($TextureMax) { $settings.VICTORY_TEXTURE_MAX = $TextureMax }
+if ($Trace) {
+    $traces = Join-Path $PSScriptRoot '..\target\traces'
+    New-Item -ItemType Directory -Force $traces | Out-Null
+    $settings.VICTORY_CAPTURE = (Resolve-Path $traces).Path
+    $settings.VICTORY_DUMP_TARGETS = '1'; $settings.VICTORY_CAPTURE_FULL = '1'
+}
 foreach ($k in $More.Keys) { $settings[$k] = $More[$k] }
 
 $victory = Join-Path $PSScriptRoot "..\target\$Build\victory.exe"
