@@ -47,6 +47,20 @@ pub(crate) fn on() -> bool {
     *ON.get_or_init(|| std::env::var_os("VICTORY_HEAP_PASS_ASIDE").is_none_or(|v| v != "0"))
 }
 
+/// Whether a list waits for the pass's results when it is submitted, on the
+/// submitting thread, not when it is closed (`VICTORY_HEAP_PASS_AT_SUBMIT=1`;
+/// off: at the close, as before). The close is on a thread of ours that
+/// translates the title's list calls, which waited 7-12 ms a frame there
+/// (runs th-count, mirror-count) while the four of them were all but always
+/// busy. The descriptors the pass makes are read by the card when the list
+/// runs (the host's tables are volatile), and its refreshes stand where the
+/// pass began: both are there before the list goes to the card.
+pub(crate) fn at_submit() -> bool {
+    static ON: std::sync::LazyLock<bool> =
+        std::sync::LazyLock::new(|| std::env::var_os("VICTORY_HEAP_PASS_AT_SUBMIT").is_some_and(|v| v == "1"));
+    *ON
+}
+
 type Job = Box<dyn FnOnce() + Send>;
 
 /// `work` begins on the thread for it, one after another; here and now if

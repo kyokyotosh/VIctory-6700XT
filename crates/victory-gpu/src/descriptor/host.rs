@@ -3284,6 +3284,9 @@ impl HostHeap {
             && self.quick.get(index as usize).is_some_and(|k| k.load(std::sync::atomic::Ordering::Acquire) == key)
             && let Some(view) = view_at(i, generation)
         {
+            if for_draw {
+                MIRRORED_FOR_DRAW[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
             return Some(view);
         }
         let held = self.made.lock(index);
@@ -3301,9 +3304,17 @@ impl HostHeap {
                 // Left for later and stale since: out of the sets and the stride table.
                 let _ = self.note_buffer(index, None, false);
             }
+            if for_draw {
+                MIRRORED_FOR_DRAW[1].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
             return None;
         };
         if shown != key {
+            if for_draw {
+                MIRRORED_FOR_DRAW[if shown == 0 { 3 } else { 4 }].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            #[cfg(feature = "diagnostics")]
+            let making = for_draw.then(std::time::Instant::now);
             // Views of other textures in the memory this one describes
             // are stale: their host slots read nothing from here on, and
             // let go of the host copies they held.
@@ -3412,6 +3423,12 @@ impl HostHeap {
             self.quick_is(index, if later { 0 } else { key });
             drop(held);
             self.unmake_stale(index, stale);
+            #[cfg(feature = "diagnostics")]
+            if let Some(making) = making {
+                MIRRORED_FOR_DRAW[5].fetch_add(making.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+            }
+        } else if for_draw {
+            MIRRORED_FOR_DRAW[2].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         Some(view)
     }
@@ -4614,6 +4631,12 @@ fn keep_views() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("VICTORY_KEEP_VIEWS").is_none_or(|v| v != "0"))
 }
+
+/// What `HostHeap::mirror` did for draws and the heap's view pass, since
+/// the last frame line: found the slot made from the record at once, found
+/// no view there, found it made after taking its lock, made it from null,
+/// made it over another view; and the nanoseconds the making took.
+pub(crate) static MIRRORED_FOR_DRAW: [std::sync::atomic::AtomicU64; 6] = [const { std::sync::atomic::AtomicU64::new(0) }; 6];
 
 /// What the texture view a slot is written with has to do with the one it
 /// shows.

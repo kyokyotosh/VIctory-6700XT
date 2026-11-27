@@ -5430,6 +5430,13 @@ impl Host {
             return;
         }
         late_threads();
+        // The heap pass's results, before anything looks at the steps
+        // (`aside::at_submit`).
+        if aside::at_submit() {
+            for list in &lists {
+                list.host().take_coming();
+            }
+        }
         if let Some(cut) = {
             let runs: Vec<&HostList> = order.iter().map(|&i| lists[i].host()).collect();
             card_steps::cut_for(&runs)
@@ -5762,6 +5769,11 @@ impl Host {
         let called = std::time::Instant::now();
         #[cfg(feature = "diagnostics")]
         crate::copystat::submission_begins();
+        if aside::at_submit() {
+            for run in runs {
+                run.take_coming();
+            }
+        }
         // One submission at a time from preparation to copy-back: snapshots
         // and the ranges shaders write are per host copy, not per submission.
         let mut stage = crate::timeline::span("submit: the submission lock");
@@ -6598,7 +6610,9 @@ impl HostList {
         }
         self.batches_common();
         self.card_budget_out();
-        self.take_coming();
+        if !aside::at_submit() {
+            self.take_coming();
+        }
         #[cfg(feature = "diagnostics")]
         if let Some((heap, back)) = self.stamps() {
             let count = (self.notes.lock().unwrap_or_else(|e| e.into_inner()).len() as u32).min(STAMPS - 1);
@@ -7923,6 +7937,28 @@ fn split_line(frames: f64) {
         h[1],
         h[2],
         aside::WAITED.swap(0, Ordering::Relaxed) as f64 / 1e3 / frames,
+    );
+    let c: Vec<f64> = crate::draw::HEAP_COUNTS.iter().map(|n| n.swap(0, Ordering::Relaxed) as f64 / frames).collect();
+    let look: Vec<f64> = crate::draw::HEAP_LOOK.iter().map(|n| n.swap(0, Ordering::Relaxed) as f64 / 1e6 / frames).collect();
+    let m: Vec<f64> =
+        crate::descriptor::host::MIRRORED_FOR_DRAW.iter().map(|n| n.swap(0, Ordering::Relaxed) as f64 / frames).collect();
+    tracing::info!(
+        "the heap's view passes per frame: {:.1} passes, {:.0} slots looked at ({:.1} ms making or finding their views, {:.1} ms \
+         finding the copies they show, all threads), {:.0} views joined into spans, {:.0} host copies to refresh; slots asked for by \
+         draws and the pass: {:.0} made from the record already, {:.0} no view, {:.0} made already (under the lock), {:.0} made from \
+         null, {:.0} made over another view ({:.1} ms making)",
+        c[0],
+        c[1],
+        look[0],
+        look[1],
+        c[2],
+        c[3],
+        m[0],
+        m[1],
+        m[2],
+        m[3],
+        m[4],
+        m[5] / 1e6
     );
 }
 
@@ -9394,6 +9430,24 @@ impl Meter {
                         "texture refreshes per frame, all threads: {all:.1} ms, of them {own:.1} ms waiting for a texture another thread \
                          is refreshing, {asking:.1} ms asking the write watch and the guards, {still:.1} ms waiting for title memory to \
                          hold still (the runtime remapping it); the rest is reading, hashing and detiling"
+                    );
+                }
+                #[cfg(feature = "diagnostics")]
+                {
+                    let h: Vec<[f64; 3]> = crate::texture::HASHED
+                        .iter()
+                        .map(|r| [0, 1, 2].map(|i| r[i].swap(0, Ordering::Relaxed) as f64 / frames))
+                        .collect();
+                    let mb = |b: f64| b / 1048576.0;
+                    let part = |name: &str, r: [f64; 3]| format!("{name} {:.0} ({:.1} MB, {:.1} MB changed)", r[0], mb(r[1]), mb(r[2]));
+                    tracing::info!(
+                        "textures hashed whole per frame, by why: {}, {}, {}, {}, {}, {}",
+                        part("the guard saw a write", h[0]),
+                        part("their turn", h[1]),
+                        part("hot", h[2]),
+                        part("no guard", h[3]),
+                        part("partly mapped", h[4]),
+                        part("first filling", h[5])
                     );
                 }
                 let [through, left, filled, short] =

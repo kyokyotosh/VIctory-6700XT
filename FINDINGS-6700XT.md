@@ -212,9 +212,33 @@ The cause: with no structures every reflection ray that leaves the screen misses
 `VICTORY_REFLECT_BOUND=<multiple>` (in `crate::ambient`, after each `CS_RayMiss`, an indirect dispatch the stand-in did not follow before): what it left is held to that multiple of the light around each point, the light the diffuse stand-in already gathers from the screen, and over it the room's light at that multiple takes its place. The water's own chain runs the same program and mirrors the sky truly; bounded, the sea near the shore went dark and green (`run-refl-bound`), so the buffer the water's resolve reads is left alone. Frame rate unchanged (12.4 against 12.1 fps median, from the save copy). The player, indoors: "way better"; other artifacts remain that are not the glossy floor. `play.ps1` sets `1`.
 
 
+## Texture refreshes and the heap's view pass (2026-11-27)
+
+Branch `texture-heap-pass`. Every run from the 09:56 save copy, `-Console series-s`, about 330 s of world.
+
+A CPU timeline of the baseline (`VICTORY_TIMELINE`, `target\tl\base.200.txt`, `base.300.txt`, six frames) puts neither on the chain the frame's present came out of: that chain is mostly the title's own threads (one running in `bink2scarlett.dll`, 11 ms a frame on average), the card, and the landing. The process ran 715–755 ms of CPU a frame (about 10 of the 16 logical cores), so what both cost counts for the contention.
+
+**Texture refreshes** (13 ms a frame over all threads). New counters (the "textures hashed whole per frame, by why" line) show that a guarded texture's hash every eighth frame, whatever the guard saw, hashed 29–40 MB of 44 textures a frame and found **nothing** changed. The writes the guard saw (3 MB) all were changes, and the copystat line found 0.0 changes the guard did not see. `VICTORY_TEXTURE_TURN_BACKOFF=1`: a turn that finds nothing doubles that texture's interval up to 64 frames; one that finds a change brings it back to 8 (and makes it hot, as before).
+
+| | Runs | Median fps | Frame | Submitting thread busy | Texture refreshes, all threads | Hashed / changed a frame |
+|---|---|---|---|---|---|---|
+| off | `run-tb-off-a`, `-off-b` | 13.2, 13.0 | 75.7, 76.9 ms | 62.3, 64.1 ms | 13.0, 12.6 ms | 38 / 3.0–3.2 MB |
+| on | `run-tb-on-a`, `-on-b` | 13.5, 12.8 | 74.1, 78.0 ms | 60.3, 63.0 ms | 4.6 ms | 4 / 3.0–3.1 MB |
+
+Two thirds of the texture work gone, the changes found the same; the frame rate within the runs' spread.
+
+**The heap's view pass** (once a frame on a thread of its own, begun at the first list that needs it): 26,000–40,000 slots looked at, 86,000–109,000 views joined into spans, about 4,080 host copies to refresh. Its time is in making slots (`HostHeap::mirror`, 15–31 ms over all threads; finding the copies they show 4–8 ms). Draws and the pass make about 6,500 slots a frame from null and 2,300 over another view (about 20 ms of making): new views, not the same view in a new record (0 of those: a switch that kept such slots was tried and removed). The list that began the pass waited for it at its close 7–12 ms a frame, and the close is on one of the four threads that translate the title's list calls (about 300 ms of work a frame between the four, of 4 × 76). `VICTORY_HEAP_PASS_AT_SUBMIT=1`: the list waits when it is submitted instead, on the submitting thread, before its steps are looked at. The descriptors the pass makes are read when the list runs (the host's tables are volatile), and its refreshes stand where the pass began.
+
+| | Runs | Median fps | Frame | Submitting thread busy | Refreshes | Wait for the pass | Translating threads |
+|---|---|---|---|---|---|---|---|
+| off | `run-hs-off-a`, `-off-b` | 13.1, 13.2 | 76.3, 75.6 ms | 65.0, 64.5 ms | 23.2, 22.3 ms | 9.8, 9.9 ms (at the close) | 300, 298 ms |
+| on | `run-hs-on-a`, `-on-b` | 13.7, 13.6 | 72.7, 73.5 ms | 63.1, 62.7 ms | 20.3, 20.4 ms | 0.0 ms (at the submission) | 287, 287 ms |
+
+By the time the submitting thread comes to the list the pass is done: nobody waits. Frame 3 ms shorter, and every measure moved the same way in both pairs; the medians of the first 45 samples are closer (13.35, 13.45 against 13.5, 13.5). The picture was not compared.
+
 ## Next steps
 
-1. Frame rate: at 1080p output the submitting thread's preparing (~60 ms) sets the frame; at native output (~100 ms a frame) the card (~80 ms of work, ~1 GB over the cut budget). Next: the refreshes and the wait for the heaps' records on the submitting thread. In the heavier street with 4 list threads the frame is about 77 ms and the card 66% busy.
+1. Frame rate: at 1080p output the submitting thread's preparing (~60 ms) sets the frame; at native output (~100 ms a frame) the card (~80 ms of work, ~1 GB over the cut budget). Next: the refreshes and the wait for the heaps' records on the submitting thread. In the heavier street with 4 list threads the frame is about 77 ms and the card 66% busy. `VICTORY_HEAP_PASS_AT_SUBMIT=1` took 3 ms off it (above); the timeline says the title's own threads are most of what is left.
 2. The card's memory runs slightly over the cut budget late in runs (10,077 / 9,997 MB); keep an eye on the GPU time if it creeps up.
 3. Fix the id 646 / id 538 validation errors separately.
 

@@ -578,6 +578,15 @@ pub(crate) static HEAP_BUFFER_MICROS: AtomicU64 = AtomicU64::new(0);
 /// the spans and refreshes of their copies, the texture side.
 #[cfg(feature = "diagnostics")]
 pub(crate) static HEAP_SPLIT: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
+/// Of the passes, since the last frame line: passes, slots looked at, views
+/// joined into spans, host copies to refresh.
+#[cfg(feature = "diagnostics")]
+pub(crate) static HEAP_COUNTS: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+/// Of the passes' looks at slots, nanoseconds since the last frame line over
+/// all threads: making or finding the slot's view (`HostHeap::mirror`), and
+/// finding the host copy it shows (`buffer_copy`).
+#[cfg(feature = "diagnostics")]
+pub(crate) static HEAP_LOOK: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
 
 /// Passes after which every buffer slot of the heap was looked at again.
 const HEAP_ROUND: u64 = 16;
@@ -900,15 +909,29 @@ fn heap_buffer_pass(heap: &crate::descriptor::Heap, host: &crate::descriptor::ho
     let heap = Shared(heap);
     // What a slot of the title's shows: its copy and range, and whether it is
     // an unordered view.
-    let look = |index: u32| {
+    let look = |index: u32, _spent: &mut [u64; 2]| {
         // A draw's table's: the draw brings what it reads up to date.
         if host.copied_tabled(index, frame) {
             return None;
         }
-        let view = host.mirror(index, heap.handle(index)?, true)?;
+        #[cfg(feature = "diagnostics")]
+        let began = std::time::Instant::now();
+        let view = heap.handle(index).and_then(|handle| host.mirror(index, handle, true));
+        #[cfg(feature = "diagnostics")]
+        let mirrored = std::time::Instant::now();
+        #[cfg(feature = "diagnostics")]
+        {
+            _spent[0] += (mirrored - began).as_nanos() as u64;
+        }
+        let view = view?;
         // The copy the slot shows (`buffer_copy`), not the one the
         // view's range alone would find.
-        let (shadow, address, len) = crate::descriptor::host::buffer_copy(&view)?;
+        let copy = crate::descriptor::host::buffer_copy(&view);
+        #[cfg(feature = "diagnostics")]
+        {
+            _spent[1] += mirrored.elapsed().as_nanos() as u64;
+        }
+        let (shadow, address, len) = copy?;
         #[cfg(feature = "diagnostics")]
         if host.shows(index, &shadow.buffer) == Some(false) {
             HEAP_VIEWS_ELSEWHERE.fetch_add(1, Ordering::Relaxed);
@@ -921,7 +944,12 @@ fn heap_buffer_pass(heap: &crate::descriptor::Heap, host: &crate::descriptor::ho
     let parts: Vec<&[u32]> = slots.chunks(AT_A_TIME).collect();
     let found: Vec<std::sync::OnceLock<Vec<_>>> = parts.iter().map(|_| Default::default()).collect();
     crate::land::each_view(false, parts.len(), &|n| {
-        let looked: Vec<_> = parts[n].iter().map(|&index| (index, look(index))).collect();
+        let mut spent = [0u64; 2];
+        let looked: Vec<_> = parts[n].iter().map(|&index| (index, look(index, &mut spent))).collect();
+        #[cfg(feature = "diagnostics")]
+        for (sum, ns) in HEAP_LOOK.iter().zip(spent) {
+            sum.fetch_add(ns, Ordering::Relaxed);
+        }
         // (After each piece while the device lives: a cheap query.)
         if alive
             && let Some(why) = crate::descriptor::host::device_removed()
@@ -996,6 +1024,10 @@ fn heap_buffer_pass(heap: &crate::descriptor::Heap, host: &crate::descriptor::ho
     #[cfg(feature = "diagnostics")]
     for (sum, time) in HEAP_SPLIT.iter().zip([looked - started, refreshed - looked]) {
         sum.fetch_add(time.as_nanos() as u64, Ordering::Relaxed);
+    }
+    #[cfg(feature = "diagnostics")]
+    for (sum, n) in HEAP_COUNTS.iter().zip([1, slots.len() as u64, u64::from(views), found.len() as u64]) {
+        sum.fetch_add(n, Ordering::Relaxed);
     }
     static LOGGED: AtomicU64 = AtomicU64::new(0);
     // The first pass and every growth of the set by half.

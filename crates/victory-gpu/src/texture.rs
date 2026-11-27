@@ -107,6 +107,45 @@ struct Last {
     /// first checks, and after the hash found a change the guard had not
     /// seen ([`hot_textures`]). 0: not checked under the guard yet.
     hot_until: u64,
+    /// With [`turn_backoff`]: the frame of the next turn's hash (0: not
+    /// set yet), and how many turns in a row found nothing new.
+    next_turn: u64,
+    quiet_turns: u32,
+}
+
+impl Last {
+    /// After a whole hash for `why` that found the texture `changed` (or
+    /// not): with [`turn_backoff`], a turn that found nothing puts the next
+    /// one twice as far off, up to [`TURN_MOST`] frames; one that found a
+    /// change brings it back to every [`TURN_EVERY`] frames.
+    fn after_hash(&mut self, why: usize, changed: bool) {
+        if why != HASH_TURN || !turn_backoff() {
+            return;
+        }
+        let most = TURN_MOST.trailing_zeros() - TURN_EVERY.trailing_zeros();
+        self.quiet_turns = if changed { 0 } else { (self.quiet_turns + 1).min(most) };
+        self.next_turn = crate::frame::current() + (TURN_EVERY << self.quiet_turns);
+    }
+}
+
+/// Frames between the hashes a guarded texture gets in turn, whatever the
+/// guard saw: what it cannot see (a write through another view of the same
+/// pages) is found this way.
+const TURN_EVERY: u64 = 8;
+/// With [`turn_backoff`], the most frames between two turns of a texture.
+const TURN_MOST: u64 = 64;
+
+/// Whether a texture whose turns keep finding nothing new is hashed in turn
+/// less and less often, every [`TURN_EVERY`] frames doubling to every
+/// [`TURN_MOST`] (`VICTORY_TEXTURE_TURN_BACKOFF=1`; off: every eighth frame,
+/// as before). In a street scene the turns hashed 29-40 MB of 44 textures a
+/// frame and found nothing changed in any (run th-count), while the guard's
+/// writes (3 MB a frame) all were. A texture whose turn finds a change is
+/// also hot ([`hot_textures`]), and starts again at every eighth frame.
+fn turn_backoff() -> bool {
+    static ON: std::sync::LazyLock<bool> =
+        std::sync::LazyLock::new(|| std::env::var_os("VICTORY_TEXTURE_TURN_BACKOFF").is_some_and(|v| v == "1"));
+    *ON
 }
 
 /// Frames a guarded texture is hashed at every check from its first check,
@@ -420,6 +459,37 @@ fn waited<T>(slot: usize, f: impl FnOnce() -> T) -> T {
     let out = f();
     REFRESH_WAITS[slot].fetch_add(started.elapsed().as_micros() as u64, std::sync::atomic::Ordering::Relaxed);
     out
+}
+
+/// Why a texture's memory was hashed whole ([`HASHED`]'s places): the guard
+/// saw a write, its turn came (every eighth frame), it was hot, it has no
+/// guard or write-watch to ask, it is partly mapped, or its first filling
+/// (a texture made for one upload).
+pub(crate) const HASH_WRITTEN: usize = 0;
+pub(crate) const HASH_TURN: usize = 1;
+pub(crate) const HASH_HOT: usize = 2;
+pub(crate) const HASH_UNGUARDED: usize = 3;
+pub(crate) const HASH_PARTIAL: usize = 4;
+pub(crate) const HASH_FIRST: usize = 5;
+
+/// Since the last frame line, per reason ([`HASH_WRITTEN`] ...): textures
+/// hashed, their bytes, and the bytes of those whose hash had changed.
+#[cfg(feature = "diagnostics")]
+pub(crate) static HASHED: [[std::sync::atomic::AtomicU64; 3]; 6] =
+    [const { [const { std::sync::atomic::AtomicU64::new(0) }; 3] }; 6];
+
+/// Counts a whole hash of `bytes` for `why`, and whether it found a change.
+#[cfg_attr(not(feature = "diagnostics"), allow(unused_variables))]
+fn note_hashed(why: usize, bytes: usize, changed: bool) {
+    #[cfg(feature = "diagnostics")]
+    {
+        use std::sync::atomic::Ordering::Relaxed;
+        HASHED[why][0].fetch_add(1, Relaxed);
+        HASHED[why][1].fetch_add(bytes as u64, Relaxed);
+        if changed {
+            HASHED[why][2].fetch_add(bytes as u64, Relaxed);
+        }
+    }
 }
 
 thread_local! {
@@ -1276,17 +1346,23 @@ impl Staging {
         static GUARD: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         // The guard saw no write: a change the hash finds came another way.
         let mut blind = false;
+        let mut why = if alone { HASH_FIRST } else { HASH_UNGUARDED };
         if !alone
             && *GUARD.get_or_init(|| std::env::var_os("VICTORY_TEXTURE_GUARD").is_none_or(|v| v != "0"))
             && let Some((now, written)) = waited(1, || crate::watch::writes(start, start + size, true))
         {
-            const HASH_EVERY: u64 = 8;
             let unwritten = last.asked != 0 && written.iter().all(|&(_, w)| w <= last.asked);
             last.asked = now;
             let frame = crate::frame::current();
-            let turn = frame
-                .wrapping_add((start >> 16) as u64)
-                .is_multiple_of(HASH_EVERY);
+            let turn = if turn_backoff() {
+                // (The first turn staggered by address, as the others were.)
+                if last.next_turn == 0 {
+                    last.next_turn = frame + 1 + (start >> 16) as u64 % TURN_EVERY;
+                }
+                frame >= last.next_turn
+            } else {
+                frame.wrapping_add((start >> 16) as u64).is_multiple_of(TURN_EVERY)
+            };
             // A texture starts hot: one written that way from its first
             // frames on changes before the hash has ever caught it.
             if last.hot_until == 0 {
@@ -1297,6 +1373,13 @@ impl Staging {
                 return 0;
             }
             blind = unwritten;
+            why = if !unwritten {
+                HASH_WRITTEN
+            } else if hot {
+                HASH_HOT
+            } else {
+                HASH_TURN
+            };
         }
         // A change the guard did not see: hashed at every check for a while.
         let found_blind = |last: &mut Last| {
@@ -1317,7 +1400,7 @@ impl Staging {
             // texture is read through the kernel instead, whole or not at
             // all (`no_wait`).
             let Some(mapped) = crate::watch::title_memory_reading_now() else {
-                return self.refresh_unlocked(last, size);
+                return self.refresh_unlocked(last, size, why);
             };
             mapped
         } else {
@@ -1351,6 +1434,7 @@ impl Staging {
                 self.detile(read);
                 true
             });
+            note_hashed(HASH_PARTIAL, size, changed);
             #[cfg(feature = "diagnostics")]
             if changed {
                 crate::copystat::add(crate::copystat::C::TexChanged, size as u64);
@@ -1366,8 +1450,12 @@ impl Staging {
                 #[cfg(feature = "diagnostics")]
                 crate::copystat::add(crate::copystat::C::TexHashed, size as u64);
                 if last.hash == Some(hash) {
+                    note_hashed(why, size, false);
+                    last.after_hash(why, false);
                     return size;
                 }
+                note_hashed(why, size, true);
+                last.after_hash(why, true);
                 last.hash = Some(hash);
                 found_blind(last);
                 self.detile(tiled);
@@ -1384,8 +1472,12 @@ impl Staging {
         #[cfg(feature = "diagnostics")]
         crate::copystat::add(crate::copystat::C::TexHashed, size as u64);
         if last.hash == Some(hash) {
+            note_hashed(why, size, false);
+            last.after_hash(why, false);
             return size;
         }
+        note_hashed(why, size, true);
+        last.after_hash(why, true);
         last.hash = Some(hash);
         found_blind(last);
         self.detile(tiled);
@@ -1402,14 +1494,17 @@ impl Staging {
     /// next refresh (what was learnt about writes to it is forgotten, so
     /// that it is not passed over as unwritten); one never filled takes the
     /// pages that are there ([`Staging::fill`]). Returns the bytes read.
-    fn refresh_unlocked(&self, last: &mut Last, size: usize) -> usize {
+    fn refresh_unlocked(&self, last: &mut Last, size: usize, why: usize) -> usize {
         use std::sync::atomic::Ordering::Relaxed;
         let read = with_read(size, |read| {
             if !crate::host::read_into(self.memory, read) {
                 return false;
             }
             let hash = digest(read);
-            if last.hash != Some(hash) {
+            let changed = last.hash != Some(hash);
+            note_hashed(why, size, changed);
+            last.after_hash(why, changed);
+            if changed {
                 last.hash = Some(hash);
                 self.detile(read);
                 self.keep_whole(read);
