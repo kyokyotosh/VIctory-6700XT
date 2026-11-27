@@ -177,9 +177,24 @@ They stay off here.
 
 `play.ps1 -Console series-s` now sets `VICTORY_UPSCALER=6`; steady 10 is reached with it. Also tried, no gain: `VICTORY_SUBMIT_FRAMES=2` (the title two frames ahead of the submitting thread; 78%), and the three renderer patches that run here together (88%).
 
+## List-translation threads (2026-11-27)
+
+Every run from one copy of the saves (restored before each), `-Console series-s`, a street where the title makes about 52,500 list calls a frame. Upstream translates them on 8 threads of ours (`VICTORY_THIN_THREADS`); on this 8-core, 16-thread CPU they compete with the title's own threads.
+
+| Threads | Runs | Median fps | ≥10 fps | CPU per list call | Landing thread, ms a frame | Card busy |
+|---|---|---|---|---|---|---|
+| 8 (upstream) | `run-base-a`, `-base-b`, `-port-a`, `-port-b` | 4.6–6.5 | 3–16% | 21–30 µs | 122–183 | 18–28% |
+| 6 | `run-thin6` | 10.9 | 65% | 9.5 µs | 52 | 55% |
+| 4 | `run-thin4`, `-thin4b` | 13.1, 12.9 | 74%, 98% | 5.8 µs | 42–44 | 60–63% |
+| 3 | `run-thin3` | 11.9 | 97% | 4.7 µs | 32 | 58% |
+| 2 | `run-thin2` | 9.8 | 26% | 3.9 µs | 28 | 47% |
+| 4, the new default (a quarter of the logical cores) | `run-new-a`, `-new-b` | 13.0, 13.3 | 97%, 98% | 5.3–5.5 µs | 40–42 | 66% |
+
+The four 8-thread runs are two of the build before the port of avatarmanz's five items (`dcdae92`) and two that were meant to be of the port but ran the earlier binary (a stray `CARGO_TARGET_DIR`). The `run-new` runs are of the port with the new default: against the earlier build at 4 threads, no change in frame rate (13.0 and 13.3 against 13.1 and 12.9).
+
 ## Next steps
 
-1. Frame rate: at 1080p output the submitting thread's preparing (~60 ms) sets the frame; at native output (~100 ms a frame) the card (~80 ms of work, ~1 GB over the cut budget). Next: the refreshes and the wait for the heaps' records on the submitting thread.
+1. Frame rate: at 1080p output the submitting thread's preparing (~60 ms) sets the frame; at native output (~100 ms a frame) the card (~80 ms of work, ~1 GB over the cut budget). Next: the refreshes and the wait for the heaps' records on the submitting thread. In the heavier street with 4 list threads the frame is about 77 ms and the card 66% busy.
 2. The card's memory runs slightly over the cut budget late in runs (10,077 / 9,997 MB); keep an eye on the GPU time if it creeps up.
 3. Fix the id 646 / id 538 validation errors separately.
 

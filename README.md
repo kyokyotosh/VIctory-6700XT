@@ -36,13 +36,14 @@ from one PC:
 | Display | 2560x1440 |
 | Settings | `scripts\play.ps1` defaults (Series X profile, ray tracing off), diagnostics build |
 
-## Where it stands (2026-11-26)
+## Where it stands (2026-11-27)
 
 | | |
 |---|---|
 | In the world, default settings | **8.8-12.6 fps, about 100 ms a frame** (about 45 ms preparing, 40 ms on the card), no device loss in 100+ s |
 | In the world, `-More @{VICTORY_OUTPUT='1920x1080'}` | **12-16 fps, 62-80 ms a frame**, the card about 60% busy and under its budget; the frame is set by preparing (about 60 ms) |
 | In the world, `-Console series-s` | **12-20 fps, steady 10 reached** (91% and 94% of samples at 10 fps or more), the card under its budget; the Series S profile with the title's own upscaler (its FidelityFX one leaves ghosts here, see below) |
+| A heavier street, `-Console series-s` (52,500 list calls a frame) | **12.9-13.1 fps** with list translation on 4 threads (now the default here), against 4.6-6.5 with the 8 of before; the card 60% busy, was 18-28% |
 | Before this fork's changes | the device was lost about 60-90 s in, at the first world load, every run; only `VICTORY_RELAY=0` ran (2.8 fps, 360 ms a frame) |
 | Menus, videos, loading screens | 30 fps |
 | Memory | about 27 GB of private memory; the card about 1 GB over the budget the system cuts to, which it holds |
@@ -157,7 +158,9 @@ RAM, not on this machine.
 The reasons and the measurements are in [docs/findings.md](docs/findings.md).
 
 - **List calls are written down, not carried out, on the title's threads**
-  (`VICTORY_THIN`): eight threads of ours translate them.
+  (`VICTORY_THIN`): threads of ours translate them, a quarter of the logical
+  cores (2 to 8; `VICTORY_THIN_THREADS`). Upstream ran 8, which on this 8-core
+  CPU fought the title's own threads: 21-30 µs a list call instead of 5.8.
 - **Submissions are prepared by a thread of ours and joined**
   (`VICTORY_ASYNC_SUBMIT`, `VICTORY_JOIN_PARTS`), with what can be spread over
   threads spread: refreshes, compares (AVX2), descriptor records, landings.

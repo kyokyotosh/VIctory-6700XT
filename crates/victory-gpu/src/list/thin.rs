@@ -299,8 +299,19 @@ fn back_list(kind: u32) -> This {
     list
 }
 
+/// How many threads translate lists (`VICTORY_THIN_THREADS`, 1 to 32): by
+/// default a quarter of the logical cores, 2 to 8. They share the cores with
+/// the title's own threads: on a Ryzen 7 5800X3D (16 logical cores) the 8
+/// of before took 21-30 us a list call in a street of 52,500 calls a frame,
+/// 4.6-6.5 fps; 4 took 5.8 us, 13.1 and 12.9 fps (6: 10.9, 3: 11.9, 2: 9.8;
+/// runs thin2..thin6, one save).
+fn threads() -> usize {
+    let asked = std::env::var("VICTORY_THIN_THREADS").ok().and_then(|v| v.trim().parse().ok());
+    asked.unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |n| (n.get() / 4).clamp(2, 8))).clamp(1, 32)
+}
+
 fn start() {
-    let threads = std::env::var("VICTORY_THIN_THREADS").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(8usize).clamp(1, 32);
+    let threads = threads();
     for i in 0..threads {
         let worker = move || {
             crate::cores::keep_many_on_fast_cores("victory-list");
