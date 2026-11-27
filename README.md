@@ -152,6 +152,7 @@ RAM, not on this machine.
 | `VICTORY_FRAME_INTERVAL_MS=16.667` | Lets the title go above 30 fps (menus and videos reach 60; the game's clock stays right) |
 | `VICTORY_AMBIENT_SETTLE` | How fast light settles after walking indoors (on by default, `250,3`; `0` turns it off) |
 | `VICTORY_TEXTURE_STORE=1` | Converted textures kept between runs (about 8 ms a frame for now: off) |
+| `VICTORY_KBM_GTA=1` | Optional GTA V PC-style keyboard and mouse mapping on the stand-in pad: `F2` or `` ` `` (`~`) toggles mouse-look and auto-hides the cursor while locked (`Esc`/`P`/focus loss unlocks and restores it), LMB/RMB = RT/LT, MMB/`C` = R3, `Shift` = A, `Space` = X, `R` = B, `F` = Y, `Tab` = LB, `Q` = RB, `Ctrl` = L3, `E` = D-pad Right, `V` = View. Tune with `VICTORY_MOUSE_SENS` (default `1.0`) and `VICTORY_MOUSE_INVERT_Y=1` (or pass via `scripts\play.ps1 -More @{VICTORY_KBM_GTA='1'}`) |
 
 ### What it changed from VIctory
 
@@ -243,7 +244,13 @@ connects; `scripts\play.ps1 -PadLog` logs its reports each time what they say
 changes, to check the mapping. With no pad connected the keyboard is one:
 W/A/S/D and I/J/K/L the sticks, the arrows the D-pad, Enter/Backspace/X/Y the
 A/B/X/Y buttons, Q/E the shoulders, Z/C the triggers, F/H the stick clicks,
-Esc/Tab Menu/View.
+Esc/Tab Menu/View. `scripts\play.ps1 -Kbm` (`VICTORY_KBM_GTA=1`) makes that pad
+GTA V PC-style, beside a pad you hold too: F2 or `` ` `` locks mouse look and
+hides the cursor (Esc, P or leaving the window lets go), the mouse buttons are
+the triggers, W/A/S/D the left stick, Shift A, Space X, R B, F Y, Tab and Q the
+shoulders, Ctrl and C the stick clicks, E the D-pad's right, V View
+(`VICTORY_MOUSE_SENS`, `VICTORY_MOUSE_INVERT_Y=1`). After zhu1025960209-web's
+pull request #295 to Belobug/VIctory-Belobug-AMD.
 
 Before the first run, ahead of time (both can be stopped and go on later). The
 shader archive here is the dump's `shaders.rpf` (25,694 shaders, about a

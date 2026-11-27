@@ -8,6 +8,8 @@
 #               with the title's own upscaler (its FidelityFX one leaves ghosts here; -More @{VICTORY_UPSCALER='7'} brings it back)
 # -Build        target\diag (the default, the build all measurements are of) or target\release
 # -PadLog       logs a PlayStation pad's reports each time what they say changes (to check its buttons)
+# -Kbm          GTA V PC-style keyboard and mouse: F2 or ~ locks mouse look (Esc or P lets go), WASD moves,
+#               mouse buttons are the triggers (README.md, "Controllers")
 # -TextureMax   caps textures' largest side to save card memory: auto (1024, 512 from 92 % of the budget,
 #               256 from 97 %) or a size such as 1024; off by default (full detail)
 # -More         other settings: -More @{VICTORY_PANEL='1'}
@@ -21,6 +23,7 @@ param(
     [ValidateSet('series-x', 'series-s')][string]$Console = 'series-x',
     [ValidateSet('diag', 'release')][string]$Build = 'diag',
     [switch]$PadLog,
+    [switch]$Kbm,
     [string]$TextureMax,
     [hashtable]$More = @{}
 )
@@ -40,6 +43,7 @@ if ($Overlay) { $settings.VICTORY_PANEL = 'fps' }
 if ($OverlayFull) { $settings.VICTORY_PANEL = '1' }
 if ($Console -eq 'series-s') { $settings.VICTORY_UPSCALER = '6' }
 if ($PadLog) { $settings.VICTORY_PS_PADS_RAW = '1' }
+if ($Kbm) { $settings.VICTORY_KBM_GTA = '1' }
 if ($TextureMax) { $settings.VICTORY_TEXTURE_MAX = $TextureMax }
 foreach ($k in $More.Keys) { $settings[$k] = $More[$k] }
 
