@@ -92,7 +92,7 @@ impl Default for GraphicsState {
 }
 
 /// Integer render target formats: D3D12 cannot blend into them.
-fn integer_format(f: DXGI_FORMAT) -> bool {
+pub(super) fn integer_format(f: DXGI_FORMAT) -> bool {
     matches!(
         f,
         DXGI_FORMAT_R32G32B32A32_UINT

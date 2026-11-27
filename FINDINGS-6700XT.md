@@ -238,10 +238,25 @@ By the time the submitting thread comes to the list the pass is done: nobody wai
 
 Picture: two runs from the same save copy, off and on (`run-cap-off`, `run-cap-on`, `VICTORY_CAPTURE_WORLD=1`: every 8th frame after the world's first, `target\cap\`), compared at the same frames after it. The same scene and the same look; what differs is the idle player's pose and the idle camera, which drift apart from run to run. No frame of either has more than 12% black pixels, none any magenta, and side by side (`target\cap\cmp\`) nothing is missing or broken. `play.ps1` now sets `VICTORY_HEAP_PASS_AT_SUBMIT=1`; the texture backoff stays off.
 
+## Pipelines from pieces (VICTORY_PIPELINE_PIECES, 2026-11-27)
+
+The title creates some pipelines through two device methods that take loose program pieces (slots 0x1c8 graphics, 0x218 compute) instead of a finished container: 16,384 and 2,048 calls a run here. Both answered E_NOTIMPL and the title went without those pipelines; it does not draw with a missing one (the frame line's "dropped ~230 a frame without a host pipeline" is all the ray-tracing structure builder's stages, which are off on purpose: "a stage of the ray-tracing structure builder, which is off" is the only reason the drop report gives).
+
+Ported from VIctory-NVIDIA-RT (`cb33680`, `8823e15`, `0fae809`, the pieces parts of `e994b90`, `9449ec9`, `89bfaf0`; branch `pipeline-pieces`): each stage's pieces are wrapped in a container of ours and go through the usual translation, cache and pipeline making. Not taken: `c6a4b60` (pipelines from pieces matched to the title's own hashes, for lists keyed by hash), whose integration rests on code of theirs we do not have; our passes are found by program name, and only graphics pipelines are made here. A shader-cache refill after the port: 25,694 shaders, 0 translated differently.
+
+Settings as their fast preset: `VICTORY_PIPELINE_PIECES=1`, `VICTORY_PIPELINE_PIECES_ONLY=graphics`, `VICTORY_PIPELINE_PIECES_REFUSE_UNTRANSLATED=1`. Four runs from the 09:56 save copy, about 330 s of world each:
+
+| | Runs | Median fps | Frame | Submitting thread busy | Graphics pipelines from pieces |
+|---|---|---|---|---|---|
+| off | `run-pp-off-a`, `-off-b` | 13.2, 13.2 | 76.0, 75.6 ms | 65.3, 64.4 ms | — |
+| on | `run-pp-on-a`, `-on-b` | 13.4, 13.4 | 74.4, 74.7 ms | 63.7, 65.0 ms | 2,671 made of 16,384 (13,713 refused) |
+
+No frame cost, the device kept, no draw dropped while a pipeline from pieces compiled. Picture (`run-pp-cap-on`, every 8th world frame, against `run-cap-off`): the **HUD's money display** ($407 and $2,480 with their icons, top right) shows with pieces and is missing without; the rest is the same scene, nothing broken. The refusals, each logged once: depth-bias words of the packet, `DB_SHADER_CONTROL EXEC_ON_NOOP` and `MASK_EXPORT_ENABLE`, `SPI_SHADER_COL_FORMAT` UNORM16/SNORM16, `SPI_PS_INPUT_CNTL FP16_INTERP_MODE`, a cull-distance channel, a blend function not handled, a stage in the description's first extra slot, an input element's semantic index, stages that do not translate. Compute (0x218) is left to the title.
+
 ## Next steps
 
 1. Frame rate: at 1080p output the submitting thread's preparing (~60 ms) sets the frame; at native output (~100 ms a frame) the card (~80 ms of work, ~1 GB over the cut budget). Next: the refreshes and the wait for the heaps' records on the submitting thread. In the heavier street with 4 list threads the frame is about 77 ms and the card 66% busy. `VICTORY_HEAP_PASS_AT_SUBMIT=1` took 3 ms off it (above); the timeline says the title's own threads are most of what is left.
-2. The card's memory runs slightly over the cut budget late in runs (10,077 / 9,997 MB); keep an eye on the GPU time if it creeps up.
+2. The card's memory runs slightly over the cut budget late in runs (10,077 / 9,997 MB); keep an eye on the GPU time if it creeps up. Pipelines from pieces: 84% of the graphics ones are still refused (above); each reason handled is more of what the title draws.
 3. Fix the id 646 / id 538 validation errors separately.
 
 ## Relay and late-wait semantics (from code)

@@ -121,7 +121,14 @@ fn program_name(bytes: &[u8]) -> Option<&str> {
 
 /// The shared container for `bytes`.
 fn shader(stage: &'static str, bytes: &[u8]) -> Arc<Shader> {
-    let full = blake3::hash(bytes);
+    shader_of(stage, std::borrow::Cow::Borrowed(bytes))
+}
+
+/// The shared container for `bytes`, which are kept as they are when they
+/// come owned and no pipeline had them yet (a container put together from
+/// loose pieces, [`pieces`]: read from title memory once, into this).
+fn shader_of(stage: &'static str, bytes: std::borrow::Cow<[u8]>) -> Arc<Shader> {
+    let full = blake3::hash(&bytes);
     let mut shaders = SHADERS.lock().unwrap_or_else(|e| e.into_inner());
     shaders
         .get_or_insert_with(HashMap::new)
@@ -132,16 +139,18 @@ fn shader(stage: &'static str, bytes: &[u8]) -> Arc<Shader> {
             // (Compute programs only: the passes traced by name are.)
             #[cfg(feature = "diagnostics")]
             if stage == "compute" {
-                tracing::info!(hash = &full.to_hex()[..16], name = program_name(bytes), "compute program");
+                tracing::info!(hash = &full.to_hex()[..16], name = program_name(&bytes), "compute program");
             }
+            #[cfg(windows)]
+            let probe = crate::lightprobe::on().then(|| crate::lightprobe::role(&bytes)).flatten();
             Arc::new(Shader {
                 stage,
                 hash: full.to_hex()[..16].to_owned(),
-                container: bytes.to_vec(),
                 #[cfg(windows)]
-                ambient: (stage == "compute").then(|| crate::ambient::role(bytes)).flatten(),
+                ambient: (stage == "compute").then(|| crate::ambient::role(&bytes)).flatten(),
                 #[cfg(windows)]
-                probe: crate::lightprobe::on().then(|| crate::lightprobe::role(bytes)).flatten(),
+                probe,
+                container: bytes.into_owned(),
                 #[cfg(windows)]
                 translated: OnceLock::new(),
             })
@@ -208,30 +217,82 @@ impl Shader {
                         "shader does not translate; its pipelines' draws are dropped"
                     ),
                 }
+                // a container from pieces that did not translate is kept
+                // for the next run, which refuses it (`pieces::refuse_untranslated`)
+                if done.is_err() {
+                    pieces::note_untranslated(&self.container);
+                }
                 done.ok()
             })
             .as_ref()
     }
 }
 
+/// With `VICTORY_PIPELINE_PIECES=1`, once per title pipeline (at most 256):
+/// what a draw or dispatch dropped without a host pipeline was aimed at, if
+/// one of the pipeline's stages is a container from pieces. `shape` says
+/// what was drawn and where, and is built only for a pipeline not yet
+/// named. The translation state is only peeked at: the title's thread must
+/// not wait for a worker's translation.
+#[cfg(windows)]
+pub(crate) fn note_unbuilt(this: This, shape: impl FnOnce() -> String) {
+    if this.is_null() || !pieces::enabled() {
+        return;
+    }
+    let p = pipeline(this);
+    // every pipeline is judged once, and one that is not from pieces is
+    // remembered too, so that its dropped draws do not parse containers again
+    static SEEN: Mutex<Option<HashMap<usize, bool>>> = Mutex::new(None);
+    {
+        let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+        let seen = seen.get_or_insert_with(HashMap::new);
+        if seen.contains_key(&(this as usize)) || seen.len() >= 4096 {
+            return;
+        }
+        let room = seen.values().filter(|&&named| named).count() < 256;
+        let named = room && p.shaders.iter().any(|s| pieces::is_pieces(&s.container));
+        seen.insert(this as usize, named);
+        if !named {
+            return;
+        }
+    }
+    let stages: Vec<String> = p
+        .shaders
+        .iter()
+        .map(|s| {
+            let state = match s.translated.get() {
+                Some(Some(_)) => "translated",
+                Some(None) => "not",
+                None => "pending",
+            };
+            format!("{} {} {state}", s.stage, s.hash)
+        })
+        .collect();
+    tracing::warn!(
+        pipeline = format_args!("{:#x}", this as usize),
+        stages = %stages.join(", "),
+        "a pipeline from pieces has no host pipeline, its draw is dropped: {}",
+        shape()
+    );
+}
+
 #[cfg(windows)]
 impl Shader {
     /// The console programs of the container; `None` if they are not known.
     pub(crate) fn programs(&self) -> Option<Vec<victory_shader::NativeProgram>> {
-        use victory_shader::{Container, FourCC};
+        use victory_shader::Container;
         let c = Container::parse(&self.container).ok()?;
-        let part = c.part(FourCC::DXIL).or(c.part(FourCC::ACCC))?;
-        victory_shader::native_programs(part.data).ok()
+        victory_shader::native_programs(c.native_part()?.data).ok()
     }
 }
 
 #[cfg(windows)]
 fn translate(container: &[u8]) -> Result<Translated, String> {
-    use victory_shader::{Container, FourCC, HwStage};
+    use victory_shader::{Container, HwStage};
     // The translation depends on it (a view index past a capped heap).
     crate::descriptor::host::probe_view_limit();
     let c = Container::parse(container).map_err(|e| e.to_string())?;
-    let programs = match c.part(FourCC::DXIL).or(c.part(FourCC::ACCC)) {
+    let programs = match c.native_part() {
         Some(part) => victory_shader::native_programs(part.data).map_err(|e| e.to_string())?,
         None => Vec::new(),
     };
@@ -792,6 +853,8 @@ pub mod known;
 mod library;
 #[cfg(windows)]
 mod make;
+#[cfg(windows)]
+pub(crate) mod pieces;
 
 /// Lets the pipeline library's mapped file go from memory when no pipeline
 /// has loaded for a while (`library::trim`); called by the host's sweep.

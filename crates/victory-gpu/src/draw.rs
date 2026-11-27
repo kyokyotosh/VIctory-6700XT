@@ -2849,6 +2849,7 @@ impl State {
                 "a dispatch without a host pipeline dropped"
             );
             DROPPED.fetch_add(1, Ordering::Relaxed);
+            self.note_unbuilt("dispatch", [x, y, z]);
             #[cfg(feature = "diagnostics")]
             {
                 crate::pipeline::note_drop(self.pipeline as This);
@@ -3824,9 +3825,43 @@ impl State {
         }
         if !ran {
             DROPPED.fetch_add(1, Ordering::Relaxed);
+            self.note_unbuilt("draw", [vertices, instances, 1]);
             #[cfg(feature = "diagnostics")]
             dropped(self.pipeline);
         }
+    }
+
+    /// With `VICTORY_PIPELINE_PIECES=1`: names once per pipeline from pieces
+    /// what its dropped draw or dispatch (`what`, with its counts) was aimed
+    /// at, when it has no host pipeline: the topology and every target's
+    /// size and format (from VIctory-NVIDIA-RT `e994b90`).
+    fn note_unbuilt(&self, what: &str, n: [u32; 3]) {
+        if !crate::pipeline::pieces::enabled() || crate::pipeline::host_pipeline(self.pipeline as This).is_some() {
+            return;
+        }
+        crate::pipeline::note_unbuilt(self.pipeline as This, || {
+            let targets: Vec<String> = self
+                .targets
+                .iter()
+                .map(|&t| match crate::resource::host_resource(t as This) {
+                    Some(texture) => {
+                        // SAFETY: a live host resource held by its title resource.
+                        let d = unsafe { texture.GetDesc() };
+                        format!("{}x{} format {}", d.Width, d.Height, d.Format.0)
+                    }
+                    None => "no host texture".to_owned(),
+                })
+                .collect();
+            format!(
+                "{what} {}x{}x{}, topology {}, depth {}, targets [{}]",
+                n[0],
+                n[1],
+                n[2],
+                self.topology,
+                self.depth != 0,
+                targets.join("; ")
+            )
+        });
     }
 
     /// Whether the bound pipeline completes rectangles itself, in the
@@ -3929,6 +3964,7 @@ impl State {
         }
         if !ran {
             DROPPED.fetch_add(1, Ordering::Relaxed);
+            self.note_unbuilt("indexed", [indices, instances, 1]);
             #[cfg(feature = "diagnostics")]
             dropped(self.pipeline);
         }
