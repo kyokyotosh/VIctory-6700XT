@@ -39,6 +39,14 @@ thread_local! {
         const { std::cell::Cell::new(None) };
 }
 
+/// `VICTORY_RAYS_MISS=1`: every ray-tracing node test returns a miss
+/// ([`Lower::bvh`]). Part of the shader cache's key.
+fn rays_miss() -> bool {
+    static ON: std::sync::LazyLock<bool> =
+        std::sync::LazyLock::new(|| std::env::var_os("VICTORY_RAYS_MISS").is_some_and(|v| v == "1"));
+    *ON
+}
+
 /// Where the instruction's node is.
 #[derive(Clone, Copy)]
 enum NodeAt {
@@ -117,6 +125,18 @@ impl<'a> Lower<'a> {
             return Err("a ray-tracing structure that returns triangle ids");
         }
         let guard = self.guard(b, i)?;
+        // `VICTORY_RAYS_MISS=1` (an experiment): every node test finds
+        // nothing, all four result dwords set (a box: no child; a triangle:
+        // a NaN distance, which no comparison takes). Whether stray hits in
+        // structures the builder did not make leave the reflections'
+        // speckle.
+        if rays_miss() {
+            let none = self.s.m.i32(u32::MAX);
+            for k in 0..4u8 {
+                self.write(inst, Reg::V(dst + k), none, guard);
+            }
+            return Ok(());
+        }
         let mut x = Vec::with_capacity(regs.len());
         for &r in &regs {
             let v = inst.read(Reg::V(r)).ok_or("an unread operand")?;
