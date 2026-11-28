@@ -392,29 +392,19 @@ extern "system" fn unknown_pipeline<const SLOT: usize>(
                 0x218 => crate::pipeline::pieces::compute(desc, _iid, out),
                 _ => crate::pipeline::pieces::graphics(desc, _iid, out),
             };
-            // Made and refused so far, per slot, said at every power of two
-            // of the calls from 1,024 on.
+            // Made and refused so far, per slot, and the refusals by reason
+            // (a handful at most: each is a string of the parsers'), said at
+            // every power of two of the calls from 1,024 on.
             static TALLY: [[AtomicU32; 2]; 2] = [const { [const { AtomicU32::new(0) }; 2] }; 2];
+            static REFUSED: Mutex<Vec<(&str, u32)>> = Mutex::new(Vec::new());
             let tally = &TALLY[usize::from(SLOT == 0x218)];
             tally[usize::from(made.is_err())].fetch_add(1, Ordering::Relaxed);
-            if calls >= 1024 && calls.is_power_of_two() {
-                tracing::info!(
-                    slot = format_args!("{:#x}", SLOT),
-                    calls,
-                    made = tally[0].load(Ordering::Relaxed),
-                    refused = tally[1].load(Ordering::Relaxed),
-                    "pipelines from pieces so far"
-                );
-            }
-            match made {
-                Ok(answer) => return answer,
-                Err(why) => {
-                    // (a handful of reasons at most: each is a string of
-                    // the parsers', so the list stays short)
-                    static REFUSED: Mutex<Vec<&str>> = Mutex::new(Vec::new());
-                    let mut refused = REFUSED.lock().unwrap_or_else(|e| e.into_inner());
-                    if !refused.contains(&why) {
-                        refused.push(why);
+            if let Err(why) = made {
+                let mut refused = REFUSED.lock().unwrap_or_else(|e| e.into_inner());
+                match refused.iter_mut().find(|(w, _)| *w == why) {
+                    Some((_, n)) => *n += 1,
+                    None => {
+                        refused.push((why, 1));
                         tracing::warn!(
                             slot = format_args!("{:#x}", SLOT),
                             calls,
@@ -422,6 +412,22 @@ extern "system" fn unknown_pipeline<const SLOT: usize>(
                         );
                     }
                 }
+            }
+            if calls >= 1024 && calls.is_power_of_two() {
+                let mut refused = REFUSED.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                refused.sort_by_key(|&(_, n)| std::cmp::Reverse(n));
+                let reasons: Vec<String> = refused.iter().map(|(w, n)| format!("{n} {w}")).collect();
+                tracing::info!(
+                    slot = format_args!("{:#x}", SLOT),
+                    calls,
+                    made = tally[0].load(Ordering::Relaxed),
+                    refused = tally[1].load(Ordering::Relaxed),
+                    "pipelines from pieces so far; refused, both slots, by reason: {}",
+                    reasons.join("; ")
+                );
+            }
+            if let Ok(answer) = made {
+                return answer;
             }
         }
     }

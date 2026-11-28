@@ -337,8 +337,15 @@ fn other_stages(rest: &[u64; 20]) -> Result<(), Refusal> {
     let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
     if !std::mem::replace(&mut seen[slot.min(4)], true) {
         let w = &rest[slot * 4..slot * 4 + 4];
+        // The head of what would be its metadata (0x403 compute, 2 graphics
+        // in the stages seen), to say which kind of stage it is.
+        let mut head = [0u8; 16];
+        let metadata = Pair { address: w[2], len: w[3] };
+        let tag = (w[3] >= 16 && read(Pair { len: 16, ..metadata }, &mut head).is_ok())
+            .then(|| head.chunks(4).map(|c| format!("{:#x}", u32::from_le_bytes([c[0], c[1], c[2], c[3]]))).collect::<Vec<_>>());
         tracing::warn!(
             words = format_args!("{:#x} {:#x} {:#x} {:#x}", w[0], w[1], w[2], w[3]),
+            metadata_head = ?tag,
             "a pipeline from pieces is not made: {why} (logged once for this slot)"
         );
     }
@@ -516,7 +523,7 @@ fn state_of(g: &Graphics) -> Result<GraphicsState, Refusal> {
         .zip(&s.names)
         .map(|(e, name)| D3D12_INPUT_ELEMENT_DESC {
             SemanticName: PCSTR(name.as_ptr().cast()),
-            SemanticIndex: 0,
+            SemanticIndex: e.index,
             Format: DXGI_FORMAT(crate::resource::pc_format(e.format) as i32),
             InputSlot: 0,
             AlignedByteOffset: e.offset,

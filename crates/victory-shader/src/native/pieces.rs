@@ -64,11 +64,12 @@
 //! +0x28 u32 1 (sample count: a guess)
 //! +0x38 u32 size of the input layout block at +0x4c: u32 element count,
 //!       then per element u32 name length with its NUL, the name, and six
-//!       u32 of which the second is the DXGI format and the fourth the byte
-//!       offset in the vertex. The other four were 0 in every element. They
-//!       lie where D3D12's element description has its semantic index, slot,
-//!       class and step rate (words 0, 2, 4 and 5), which no capture
-//!       confirms, so a value in any of them is refused by its place
+//!       u32: D3D12's element description from its semantic index on
+//!       (index, DXGI format, slot, byte offset, class, step rate), by the
+//!       format and the offset, which sit where D3D12 has them. The index
+//!       is taken (it was the most common refusal of a street: 4,935 calls
+//!       of 16,384); a value in the slot, class or step rate is refused by
+//!       its place, since none was seen
 //!
 //! metadata piece
 //! +0x00 u32 0x403 (compute) or 2 (graphics)
@@ -152,6 +153,7 @@ fn outside(value: u32, unhandled: u32, fields: &[(u32, Refusal)], other: Refusal
 const CL_CLIP_DIST_ENA: u32 = 0xff;
 const CL_CCDIST0_VEC: u32 = 1 << 22;
 const CL_CCDIST1_VEC: u32 = 1 << 23;
+const CL_MISC_SIDE_BUS: u32 = 1 << 24;
 
 /// How many clip distances a vertex program exports, from
 /// `SPI_SHADER_POS_FORMAT` and `PA_CL_VS_OUT_CNTL`; why not if the two
@@ -160,15 +162,26 @@ const CL_CCDIST1_VEC: u32 = 1 << 23;
 /// (the first vector holds 0-3, the second 4-7: radeonsi's export order, and
 /// the order the lowering of a position export takes), each vector exported
 /// where `VS_OUT_CCDIST0_VEC_ENA` or `VS_OUT_CCDIST1_VEC_ENA` says and in
-/// the four-component format. Cull distances and the miscellaneous vector
-/// are refused: a capture has a cull distance 0 enabled beside the clip
-/// distance 0 and a single exported channel, which does not say which
-/// channel a cull distance takes.
+/// the four-component format. A cull distance on a channel that is also
+/// clipped adds nothing to the clipping (a primitive that the distance
+/// culls lies wholly on the clipped side), so it is taken; one on a channel
+/// that is not clipped is refused. `VS_OUT_MISC_SIDE_BUS_ENA` only routes
+/// the miscellaneous vector, which is refused, so it means nothing alone
+/// (radeonsi sets it on GFX10.3 whenever there is more than one position
+/// export). The capture that had a cull distance had a clip and a cull
+/// distance 0, one vector and the side bus.
 fn clip_distances(pos_format: u32, out_cntl: u32) -> Result<u8, Refusal> {
     if pos_format & 0xf != 4 {
         return Err("SPI_SHADER_POS_FORMAT POS0_EXPORT_FORMAT other than 4COMP (4)");
     }
-    let rest = out_cntl & !(CL_CLIP_DIST_ENA | CL_CCDIST0_VEC | CL_CCDIST1_VEC);
+    let clip = out_cntl & CL_CLIP_DIST_ENA;
+    let cull = out_cntl >> 8 & 0xff;
+    let taken = CL_CLIP_DIST_ENA
+        | CL_CCDIST0_VEC
+        | CL_CCDIST1_VEC
+        | CL_MISC_SIDE_BUS
+        | if cull & !clip == 0 { 0xff00 } else { 0 };
+    let rest = out_cntl & !taken;
     if rest != 0 {
         return Err(outside(
             out_cntl,
@@ -176,22 +189,17 @@ fn clip_distances(pos_format: u32, out_cntl: u32) -> Result<u8, Refusal> {
             &[
                 (
                     0xff00,
-                    "PA_CL_VS_OUT_CNTL CULL_DIST_ENA_0..7 (bits 8-15): the channel of a cull distance is not settled",
+                    "PA_CL_VS_OUT_CNTL CULL_DIST_ENA_0..7 (bits 8-15) on a channel that is not clipped",
                 ),
                 (
                     0x1f_0000,
                     "PA_CL_VS_OUT_CNTL USE_VTX_POINT_SIZE, EDGE_FLAG, RENDER_TARGET_INDX, VIEWPORT_INDX or KILL_FLAG (bits 16-20)",
                 ),
                 (1 << 21, "PA_CL_VS_OUT_CNTL VS_OUT_MISC_VEC_ENA (bit 21)"),
-                (
-                    1 << 24,
-                    "PA_CL_VS_OUT_CNTL VS_OUT_MISC_SIDE_BUS_ENA (bit 24)",
-                ),
             ],
             "PA_CL_VS_OUT_CNTL bits above bit 24",
         ));
     }
-    let clip = out_cntl & CL_CLIP_DIST_ENA;
     // Distances count up from 0: the lowering takes the signature's
     // distances in order, from channel 0 of the first vector.
     if clip & (clip + 1) != 0 {
@@ -294,14 +302,17 @@ const PS_W32_EN: u32 = 1 << 15;
 /// (`DEFAULT_VAL` says which).
 const CONSTANT_OFFSET: u32 = 0x20;
 /// What a pixel stage's `DB_SHADER_CONTROL` may set: Z_EXPORT_ENABLE (0),
-/// Z_ORDER (4-5), KILL_ENABLE (6), DEPTH_BEFORE_SHADER (12),
-/// CONSERVATIVE_Z_EXPORT (13-14) and DUAL_QUAD_DISABLE (15, which Mesa sets
-/// where the render backend's blend optimisations are off). EXEC_ON_HIER_FAIL
-/// (9), EXEC_ON_NOOP (10) and PRIMITIVE_ORDERED_PIXEL_SHADER (16) stay
-/// refused: D3D12 has no field for the first two, which decide whether a
+/// Z_ORDER (4-5), KILL_ENABLE (6), EXEC_ON_NOOP (10), DEPTH_BEFORE_SHADER
+/// (12), CONSERVATIVE_Z_EXPORT (13-14) and DUAL_QUAD_DISABLE (15, which Mesa
+/// sets where the render backend's blend optimisations are off).
+/// EXEC_ON_NOOP runs the program for what it writes to memory when it
+/// exports nothing (radeonsi sets it for programs that write memory); a
+/// host pixel program that writes through views runs for its writes all
+/// the same. EXEC_ON_HIER_FAIL (9) and PRIMITIVE_ORDERED_PIXEL_SHADER (16)
+/// stay refused: D3D12 has no field for the first, which decides whether a
 /// program that writes memory runs for pixels the depth test rejects, and
-/// nothing in the host program carries rasteriser ordering for the third.
-const DB_HANDLED: u32 = 0x1 | 0x30 | 0x40 | 0x1000 | 0x6000 | 0x8000;
+/// nothing in the host program carries rasteriser ordering for the second.
+const DB_HANDLED: u32 = 0x1 | 0x30 | 0x40 | 0x400 | 0x1000 | 0x6000 | 0x8000;
 /// The fields of `SPI_PS_INPUT_CNTL` that are not handled, by their bits.
 const INPUT_CNTL_FIELDS: [(u32, Refusal); 11] = [
     (
@@ -535,6 +546,8 @@ pub fn compute(packet: &[u8], code: usize, metadata: usize) -> Result<Draft, Ref
 pub struct Element {
     /// Its semantic name: letters, digits and underscores.
     pub name: String,
+    /// Its semantic index.
+    pub index: u32,
     /// DXGI format.
     pub format: u32,
     /// Byte offset in the vertex.
@@ -581,7 +594,7 @@ pub struct Graphics {
     pub depth_format: u8,
     /// 3 triangles, 19 the console's rectangles.
     pub topology: u8,
-    /// Every element is of slot 0, per vertex, semantic index 0.
+    /// Every element is of slot 0, per vertex.
     pub elements: Vec<Element>,
     vertex_vgprs: u16,
     vertex_user_sgprs: u32,
@@ -905,13 +918,11 @@ impl Graphics {
                 None => return Err(BAD),
             };
             at += 24;
-            // Words 0, 2, 4 and 5 lie where D3D12's element description has
-            // the semantic index, the slot, the class and the step rate, in
-            // that order (words 1 and 3 are where it has the format and the
-            // offset). All were zero wherever seen, so that order is a
-            // guess, and each refusal names the word that carried a value.
+            // Word 0 is the semantic index; words 2, 4 and 5 lie where
+            // D3D12's element description has the slot, the class and the
+            // step rate. Those were zero wherever seen, so each refusal
+            // names the word that carried a value.
             for (at, why) in [
-                (0, "an input element with a value in word 0 (the semantic index, by a guess)"),
                 (2, "an input element with a value in word 2 (the slot, by a guess)"),
                 (4, "an input element with a value in word 4 (the class, by a guess)"),
                 (5, "an input element with a value in word 5 (the step rate, by a guess)"),
@@ -920,12 +931,20 @@ impl Graphics {
                     return Err(why);
                 }
             }
+            if words[0] > 31 {
+                return Err("an input element with an implausible semantic index");
+            }
             if words[3] > 0x800 {
                 return Err("an input element at an implausible byte offset");
             }
+            let name = String::from_utf8_lossy(name).into_owned();
+            if elements.iter().any(|e: &Element| e.name.eq_ignore_ascii_case(&name) && e.index == words[0]) {
+                return Err("two input elements with one semantic name and index");
+            }
             elements.push(Element {
                 // (checked ASCII above)
-                name: String::from_utf8_lossy(name).into_owned(),
+                name,
+                index: words[0],
                 format: words[1],
                 offset: words[3],
             });
@@ -1069,7 +1088,7 @@ impl Graphics {
         for (e, to) in self.elements.iter().zip(extra.chunks_exact_mut(ELEMENT)) {
             to[..e.name.len()].copy_from_slice(e.name.as_bytes());
             // semantic index, format, slot, byte offset
-            for (i, v) in [0, e.format, 0, e.offset].into_iter().enumerate() {
+            for (i, v) in [e.index, e.format, 0, e.offset].into_iter().enumerate() {
                 to[NAME + 4 * i..NAME + 4 * i + 4].copy_from_slice(&v.to_le_bytes());
             }
         }
@@ -1084,7 +1103,7 @@ impl Graphics {
                 let (_, channels) = element_shape(e.format)?;
                 Some(Row {
                     name: &e.name,
-                    index: 0,
+                    index: e.index,
                     system: 0,
                     component: 3,
                     register: i as u32,
@@ -1848,6 +1867,7 @@ mod tests {
             g.elements[1],
             Element {
                 name: "COLOR".into(),
+                index: 0,
                 format: 28,
                 offset: 12
             }
@@ -2031,7 +2051,7 @@ mod tests {
             refused(&|p| put(p, G_DB_SHADER_CONTROL, 0x110)),
             "a coverage export"
         );
-        for bit in [9, 10, 16] {
+        for bit in [9, 16] {
             assert!(
                 refused(&|p| put(p, G_DB_SHADER_CONTROL, 1 << bit)),
                 "DB_SHADER_CONTROL bit {bit}"
@@ -2225,18 +2245,21 @@ mod tests {
             let why = clip_distances(0x44, 1 | vec0 | bits).unwrap_err();
             assert!(why.contains(field), "{bits:#x}: {why}");
         };
-        named(1 << 8, "CULL_DIST_ENA");
-        named(1 << 15, "CULL_DIST_ENA");
+        // A cull distance on a channel that is not clipped (distance 0 is).
+        named(1 << 9, "not clipped");
+        named(1 << 15, "not clipped");
         named(1 << 16, "USE_VTX_POINT_SIZE");
         named(1 << 19, "VIEWPORT_INDX");
         named(1 << 21, "VS_OUT_MISC_VEC_ENA");
-        named(1 << 24, "VS_OUT_MISC_SIDE_BUS_ENA");
         named(1 << 25, "above bit 24");
         named(1 << 31, "above bit 24");
+        // A cull distance on the clipped channel, and the side bus alone,
+        // change nothing.
+        assert_eq!(clip_distances(0x44, 1 | vec0 | 1 << 8), Ok(1));
+        assert_eq!(clip_distances(0x44, 1 | vec0 | 1 << 24), Ok(1));
         // The one value captured: a clip and a cull distance 0, a vector
         // and the side bus.
-        let seen = 0x0140_0101;
-        assert!(clip_distances(0x44, seen).unwrap_err().contains("CULL_DIST_ENA"));
+        assert_eq!(clip_distances(0x44, 0x0140_0101), Ok(1));
     }
 
     #[test]
@@ -2285,12 +2308,18 @@ mod tests {
     fn input_elements_with_values_are_refused_by_their_word() {
         let packet = graphics_packet(false, 0, &[]);
         let at = |word: usize| S_BLOCK + 17 + 4 * word;
-        for (word, field) in [(0, "word 0"), (2, "word 2"), (4, "word 4"), (5, "word 5")] {
+        for (word, field) in [(2, "word 2"), (4, "word 4"), (5, "word 5")] {
             let mut s = state_piece(&ELEMENTS);
             put(&mut s, at(word), 1);
             let reason = Graphics::parse(&packet, &s, false).unwrap_err();
             assert!(reason.contains(field), "{reason}");
         }
+        // Word 0 is the semantic index.
+        let mut s = state_piece(&ELEMENTS);
+        put(&mut s, at(0), 3);
+        assert_eq!(Graphics::parse(&packet, &s, false).unwrap().elements[0].index, 3);
+        put(&mut s, at(0), 32);
+        assert!(Graphics::parse(&packet, &s, false).unwrap_err().contains("semantic index"));
         // The format and the offset are read, wherever the others stand.
         let mut s = state_piece(&ELEMENTS);
         put(&mut s, at(1), 2);
@@ -2346,9 +2375,10 @@ mod tests {
         );
         assert!(refused(&|s| s[S_TOPOLOGY] = 2), "lines");
         assert!(refused(&|s| put(s, S_SAMPLES, 4)), "multisampling");
-        // The element's first word after its name (index, slot, class or
-        // step rate: all must be zero).
-        assert!(refused(&|s| put(s, S_BLOCK + 8 + 9, 1)));
+        // The element's first word after its name is its semantic index;
+        // the slot, two words on, must be zero.
+        assert!(!refused(&|s| put(s, S_BLOCK + 8 + 9, 1)));
+        assert!(refused(&|s| put(s, S_BLOCK + 8 + 9 + 8, 1)));
         // An empty layout is one.
         assert!(Graphics::parse(&packet, &state_piece(&[]), false).is_ok());
     }

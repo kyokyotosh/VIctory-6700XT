@@ -253,10 +253,29 @@ Settings as their fast preset: `VICTORY_PIPELINE_PIECES=1`, `VICTORY_PIPELINE_PI
 
 No frame cost, the device kept, no draw dropped while a pipeline from pieces compiled (in the A/B runs). Picture: the same scene, nothing broken. **Correction:** the first run with pieces (`run-pp-cap-on`) showed the HUD's money display ($407 and $2,480, top right) from about frame 300 to 3,000 after the world loaded, and I first took that as something pieces brought back. It does not come back: a control run of the same build from the same save copy (`run-ctl-pp`) has it in 0 of 489 captured frames, and so do three runs of the next build (`run-pr-cap-on`, `run-bis-index`, `run-bis-cullnoop`). That first run was the only one with draws dropped while their pipelines from pieces compiled (5 named, one of them a 4-vertex strip into a 3840x2160 RGBA8 target); the title normally hides the money display here, so most likely a draw that hides it was one of those dropped. The refusals, each logged once: depth-bias words of the packet, `DB_SHADER_CONTROL EXEC_ON_NOOP` and `MASK_EXPORT_ENABLE`, `SPI_SHADER_COL_FORMAT` UNORM16/SNORM16, `SPI_PS_INPUT_CNTL FP16_INTERP_MODE`, a cull-distance channel, a blend function not handled, a stage in the description's first extra slot, an input element's semantic index, stages that do not translate. Compute (0x218) is left to the title.
 
+### The refusals (branch `pieces-refusals`)
+
+The log now counts refusals by reason (at every power of two of the calls from 1,024). One run (`run-pr-count`): 4,935 calls refused for a value in an input element's word 0, 4,016 for a stage in the description's first extra slot, 2,913 for stages that did not translate in an earlier run, 1,267 for a cull distance, 436 for 16-bit interpolation, 95 for `EXEC_ON_NOOP`, a few dozen for the rest (blend function, depth bias, mask export, 16-bit export formats).
+
+Taken now:
+
+- **Word 0 of an input element is its semantic index.** The six words after the name are D3D12's element description from the semantic index on: the format and the byte offset sit where D3D12 has them (words 1 and 3), so word 0 is the index. It goes into the stage's container, the vertex input signature and the host's input layout alike; a name and index met twice, or an index above 31, is refused. The slot, class and step rate (words 2, 4, 5) stay refused if they hold anything.
+- **A cull distance on a channel that is also clipped.** A primitive the distance culls lies wholly where the clip distance cuts it away, so the cull adds nothing; a cull distance on a channel that is not clipped stays refused. `VS_OUT_MISC_SIDE_BUS_ENA` alone (radeonsi sets it on GFX10.3 for a second position export) routes the miscellaneous vector, which stays refused, so it means nothing by itself.
+- **`DB_SHADER_CONTROL EXEC_ON_NOOP`** (radeonsi sets it for a program that writes memory): a host pixel program that writes through views runs for its writes anyway. `EXEC_ON_HIER_FAIL` stays refused.
+
+Same save copy, four runs (after one warm-up run with this translator, `run-pr-cap-on`, which fills the list of stages that do not translate):
+
+| | Runs | Median fps | Frame | Submitting thread busy | Graphics pipelines from pieces |
+|---|---|---|---|---|---|
+| off | `run-pr-off-a`, `-off-b` | 13.3, 12.9 | 75.3, 77.4 ms | 64.9, 65.8 ms | — |
+| on | `run-pr-on-a`, `-on-b` | 13.2, 13.2 | 75.5, 75.8 ms | 63.5, 64.8 ms | 3,596 made of 16,384 (was 2,671) |
+
+No frame cost, the device kept, no draw dropped. Picture (`run-pr-cap-on`, 515 frames): the same scene as without pieces, no frame over 15% black, none with magenta. Most of what parses now stops at translation: 8,277 calls refused for a stage that does not translate (mostly "an address with two computed terms", then addresses not from a root parameter, pixel system inputs), 4,016 for the extra slot (its metadata is a graphics stage's, kind 2: a third stage, likely of the console's geometry path), 442 for 16-bit interpolation.
+
 ## Next steps
 
 1. Frame rate: at 1080p output the submitting thread's preparing (~60 ms) sets the frame; at native output (~100 ms a frame) the card (~80 ms of work, ~1 GB over the cut budget). Next: the refreshes and the wait for the heaps' records on the submitting thread. In the heavier street with 4 list threads the frame is about 77 ms and the card 66% busy. `VICTORY_HEAP_PASS_AT_SUBMIT=1` took 3 ms off it (above); the timeline says the title's own threads are most of what is left.
-2. The card's memory runs slightly over the cut budget late in runs (10,077 / 9,997 MB); keep an eye on the GPU time if it creeps up. Pipelines from pieces: 84% of the graphics ones are still refused (above); each reason handled is more of what the title draws.
+2. The card's memory runs slightly over the cut budget late in runs (10,077 / 9,997 MB); keep an eye on the GPU time if it creeps up. Pipelines from pieces: 78% of the graphics ones are still refused, now mostly stages the translator does not take (address forms) and a third stage kind (above).
 3. Fix the id 646 / id 538 validation errors separately.
 
 ## Relay and late-wait semantics (from code)
