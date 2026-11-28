@@ -251,6 +251,17 @@ About 1 GB more title textures stay on the card (3.1-3.4 → 4.0-4.5 GB), none i
 
 **The HUD's money display** ($407 / $2,480) shows in `room-on-b` (360 frames) and `room-off-c` (343) and not in `room-on-c`: it comes and goes between runs of one build, as in `run-pp-cap-on`. It is the title's own variation, not something pipelines from pieces or this switch change.
 
+### The automatic rule (branch `room-auto`, from VI-BR-PORT 7e818069)
+
+Without the switch the room kept now follows the targets: 3,072 MB in all until 300 presents after the world's first frame (the first with 500 draws or more), as before; then the targets' peak and a quarter more, at least 384 MB, grown by 256 MB each time the card's memory in use passes the budget, never more than 3,072 MB. `VICTORY_CARD_ROOM_FOR_TARGETS_MB=<n>` keeps n MB in all, as before (`3072`: the old rule exactly). A line once a minute says what is kept and why. Same save copy, one build, captures on in every run, `3072` against no switch:
+
+| | Runs | Median fps | Frame | Submitting thread | Textures with no host copy | Let go / made again | Passes with no room | Card most in use (least budget) | Kept for targets at the end |
+|---|---|---|---|---|---|---|---|---|---|
+| old rule (`3072`) | `auto-off-a`, `-b` | 12.4, 12.5 | 80.9, 79.8 ms | 71.3, 70.1 ms | 16,121, 15,118 | 13,646/388, 12,570/328 | 36, 18 | 8,008, 7,819 MB (9,964) | 1,886, 1,882 MB |
+| automatic | `auto-on-a`, `-b` | 12.8, 12.2 | 78.2, 82.0 ms | 71.3, 72.7 ms | 2,806, 2,766 | 0/0 in both | 0 in both | 7,788, 8,480 MB (9,967) | 392, 384 MB (targets 1,188-1,229 MB at most) |
+
+The same as 1,600 by hand: none let go, 0.6-1.3 GB more textures on the card (3.3-3.4 → 3.9-4.6 GB), the card under its budget in every sample (the margin never grew), the device kept, the frame unchanged. Before the world the rule is the old one, and the loading screen's artwork showed in both runs; no frame broken (magenta at most 0.06%, black frames only at the loading transition).
+
 ## Next steps
 
 1. Frame rate: at 1080p output the submitting thread's preparing (~60 ms) sets the frame; at native output (~100 ms a frame) the card (~80 ms of work, ~1 GB over the cut budget). Next: the refreshes and the wait for the heaps' records on the submitting thread. In the heavier street with 4 list threads the frame is about 77 ms and the card 66% busy. `VICTORY_HEAP_PASS_AT_SUBMIT=1` took 3 ms off it (above); the timeline says the title's own threads are most of what is left.

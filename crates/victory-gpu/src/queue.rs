@@ -944,6 +944,9 @@ extern "system" fn present(
         release_held(forces());
     }
     let frame = FRAMES.fetch_add(1, Ordering::Relaxed) + 1;
+    // The room kept for render targets, and its line.
+    #[cfg(windows)]
+    crate::resource::targets_presented(frame);
     if frame.is_power_of_two() {
         let (draws, dispatches) = crate::list::take_counts();
         #[cfg(windows)]
