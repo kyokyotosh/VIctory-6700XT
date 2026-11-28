@@ -278,9 +278,20 @@ Ported from VI-BR-PORT (1e78da5d, `titletime.rs`): the title's imports of the sy
 
 What sets the frame here is our thread that prepares: never idle for want of work, 69 ms of a 76-78 ms frame, while the title's submitting thread waits about 25 ms of each frame in Present for it. The title's own work on that thread is about 51 ms: our preparing would have to come down by about 20 ms before the title's thread sets the frame [INFERENCE: the title's other threads may lengthen then]. The write faults cost the title's worker threads 0.15-0.16 ms each, about 110 ms of their time a frame; they are not on the submitting thread. The title's list calls go through thin lists and are not timed here ("recording threads 0").
 
+## The title's write faults and the guards' lock (`VICTORY_PORT_GUARD=1`, 2026-11-28)
+
+A write fault opens a guarded 64 KiB block: one `VirtualProtect` or a few (`watch.rs` `open_faulted`, `unguard`), microseconds. The 0.15 ms each is the guards' lock, which a fault takes alone, behind the refreshes that guard view memory under it. Renderer port #6 (`VICTORY_PORT_GUARD=1`, in the tree, off) takes it shared, with a claim per block. At 1080p Series X it once stopped the title on an `int3` before the world (above); with the Series S profile now it runs (`pg-probe`, 610 captured frames: the same scene, no broken frame). Same save copy, `VICTORY_TITLE_TIME=1` in all four runs:
+
+| | fps | Frame | Our thread that prepares: working / standing at a wait | Refreshes on it | The title in Present | The title's own work | The title's write faults | The relay: landing / waiting for the card |
+|---|---|---|---|---|---|---|---|---|
+| off (`pg-off-a`, `-b`) | 13.3, 12.9 | 75.2, 77.8 ms | 67.8 / 4.6, 68.4 / 8.8 ms | 24.0, 22.0 ms | 21.8, 27.6 ms | 50.9, 50.1 ms | 110.6 ms in 686, 102.0 in 682 | 39.7 / 24.3, 43.7 / 25.0 ms |
+| `VICTORY_PORT_GUARD=1` (`pg-on-a`, `-b`) | 13.0, 13.0 | 77.0, 76.8 ms | 62.1 / 12.7, 63.9 / 12.5 ms | 16.9, 16.7 ms | 28.2, 29.7 ms | 47.2, 46.4 ms | 41.2 ms in 695, 38.6 in 685 | 43.0 / 24.4, 47.4 / 23.3 ms |
+
+With the lock shared a fault costs 0.06 ms instead of 0.15 (the same ~690 a frame), the refreshes on our thread that prepares take 5-7 ms less and the title's own work on its submitting thread 4 ms less; the frame does not move. What our thread saved it now spends standing at a wait (12.5 ms against 5-9): a fence wait of the title's between queues, met when the card has run what it waits for and the relay has landed it (the relay lands 40-47 ms a frame). So past the lock the frame is set by that chain, the card's work and its landing, not by the faults. The switch stays off: no gain in the frame, and the shared lock is the riskier mode.
+
 ## Next steps
 
-1. Frame rate: at 1080p output our thread that prepares submissions sets the frame (69 ms working of 76-78, never idle; the title waits ~25 ms in Present for it, above); at native output (~100 ms a frame) the card (~80 ms of work, ~1 GB over the cut budget). Next: the refreshes and the wait for the heaps' records on that thread. `VICTORY_HEAP_PASS_AT_SUBMIT=1` took 3 ms off it (above). The title's write faults (~700 a frame, 0.15 ms each on its worker threads) are the other large cost found.
+1. Frame rate: at 1080p output our thread that prepares submissions sets the frame (69 ms working of 76-78, never idle; the title waits ~25 ms in Present for it, above); at native output (~100 ms a frame) the card (~80 ms of work, ~1 GB over the cut budget). With the guards' lock shared (above) that thread works 5 ms less and waits for fences met by the card and the relay's landing instead: what the title's waits between queues stand at, and how fast flights land, is next.
 2. The card's memory runs slightly over the cut budget late in runs (10,077 / 9,997 MB); keep an eye on the GPU time if it creeps up.
 3. Fix the id 646 / id 538 validation errors separately.
 
