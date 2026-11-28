@@ -238,6 +238,19 @@ By the time the submitting thread comes to the list the pass is done: nobody wai
 
 Picture: two runs from the same save copy, off and on (`run-cap-off`, `run-cap-on`, `VICTORY_CAPTURE_WORLD=1`: every 8th frame after the world's first, `target\cap\`), compared at the same frames after it. The same scene and the same look; what differs is the idle player's pose and the idle camera, which drift apart from run to run. No frame of either has more than 12% black pixels, none any magenta, and side by side (`target\cap\cmp\`) nothing is missing or broken. `play.ps1` now sets `VICTORY_HEAP_PASS_AT_SUBMIT=1`; the texture backoff stays off.
 
+## Room kept for render targets (`VICTORY_CARD_ROOM_FOR_TARGETS_MB`, 2026-11-28)
+
+The texture queue counts `3,072 MB − what render targets hold now` as used (`resource.rs` `targets_room_kept`), for the whole run. With the Series S profile the targets hold 1,173 MB, so 1,899 MB stay kept for targets that never come: the card stood at 7.6-7.9 GB of a 9.5-11.5 GB budget while the queue reported no room. VI-BR-PORT found the same (7e818069; 1.4 GB of targets at Series S, 720p upscaler). Same save copy, captures on in every run (every 8th world frame), `1600` against the default:
+
+| | Runs | Median fps | Frame | Submitting thread | Textures with no host copy | Let go / made again | Passes with no room | Card most in use (least budget) |
+|---|---|---|---|---|---|---|---|---|
+| default | `room-off-a`, `-b`, `-c` | 12.7, 12.7, 12.1 | 79.0, 78.8, 83.0 ms | 71.9, 69.9, 74.5 ms | 12,192, 11,129, 11,840 | 9,441/81, 8,367/72, 9,117/74 | 13, 42, 17 | 7,594-7,868 MB (9,516-10,011) |
+| `1600` | `room-on-a`, `-b`, `-c` | 12.9, 12.4, 12.6 | 77.5, 80.4, 79.7 ms | 70.5, 72.7, 70.6 ms | 2,818, 2,788, 2,836 | 0/0 in all | 0 in all | 7,787-8,388 MB (10,011-11,475) |
+
+About 1 GB more title textures stay on the card (3.1-3.4 → 4.0-4.5 GB), none is let go, the card stays 1.6 GB or more under its budget, the device kept, no frame-rate change (within the run-to-run spread). The picture cannot be compared frame by frame: the title's idle camera takes another path in each run. In the world no frame is broken (magenta at most 0.06% of a frame, black frames only at the loading transition, as in every run). **Open:** in `room-on-c` the loading screen's artwork (frames 880-1136) was black, in no other of the 10 captured runs (`room-on-b` showed it); nothing in its log differs. Not settled whether that comes from the switch.
+
+**The HUD's money display** ($407 / $2,480) shows in `room-on-b` (360 frames) and `room-off-c` (343) and not in `room-on-c`: it comes and goes between runs of one build, as in `run-pp-cap-on`. It is the title's own variation, not something pipelines from pieces or this switch change.
+
 ## Next steps
 
 1. Frame rate: at 1080p output the submitting thread's preparing (~60 ms) sets the frame; at native output (~100 ms a frame) the card (~80 ms of work, ~1 GB over the cut budget). Next: the refreshes and the wait for the heaps' records on the submitting thread. In the heavier street with 4 list threads the frame is about 77 ms and the card 66% busy. `VICTORY_HEAP_PASS_AT_SUBMIT=1` took 3 ms off it (above); the timeline says the title's own threads are most of what is left.
