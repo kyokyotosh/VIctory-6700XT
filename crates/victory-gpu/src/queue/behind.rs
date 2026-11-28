@@ -135,6 +135,8 @@ struct State<W> {
     /// what is behind a wait may have been written only before the wait was
     /// met, not before it was put in the line.
     floors: Vec<(usize, u64)>,
+    /// What asked for the last look (`crate::titletime`'s `WOKEN_*`).
+    woken: u8,
 }
 
 impl<W> State<W> {
@@ -171,6 +173,7 @@ impl<W: Work> Lane<W> {
                 presents: 0,
                 runs: 0,
                 floors: Vec::new(),
+                woken: 0,
             }),
             work: Condvar::new(),
             moved: Condvar::new(),
@@ -198,6 +201,7 @@ impl<W: Work> Lane<W> {
             Self::put(&mut state, queue, what, mark);
         }
         state.asked += 1;
+        state.woken = crate::titletime::WOKEN_PUT;
         drop(state);
         self.work.notify_one();
     }
@@ -213,6 +217,7 @@ impl<W: Work> Lane<W> {
             now();
         }
         state.asked += 1;
+        state.woken = crate::titletime::WOKEN_PUT;
         drop(state);
         self.work.notify_one();
     }
@@ -224,6 +229,7 @@ impl<W: Work> Lane<W> {
             return;
         }
         state.asked += 1;
+        state.woken = crate::titletime::WOKEN_WAKE;
         drop(state);
         self.work.notify_one();
     }
@@ -240,6 +246,7 @@ impl<W: Work> Lane<W> {
         }
         state.asked += 1;
         let ticket = state.asked;
+        state.woken = crate::titletime::WOKEN_DRAIN;
         self.work.notify_one();
         while state.served < ticket {
             state = self.moved.wait(state).unwrap_or_else(|e| e.into_inner());
@@ -268,6 +275,12 @@ impl<W: Work> Lane<W> {
         loop {
             let (asked, limit) = {
                 let mut state = self.lock();
+                // `VICTORY_TITLE_TIME`: how long this thread is idle, with
+                // the line empty (it waits for the title) or standing at a
+                // wait (for the card, or a value), and what ends it.
+                let idle = (state.asked == state.served).then(crate::titletime::now).flatten();
+                let empty = state.items.is_empty();
+                let mut looked = false;
                 while state.asked == state.served {
                     if state.items.is_empty() {
                         state = self.work.wait(state).unwrap_or_else(|e| e.into_inner());
@@ -278,13 +291,22 @@ impl<W: Work> Lane<W> {
                             self.work.wait_timeout(state, Duration::from_millis(1)).unwrap_or_else(|e| e.into_inner());
                         state = back;
                         if out.timed_out() {
+                            looked = true;
                             break;
                         }
                     }
                 }
+                if let Some(idle) = idle {
+                    let why = if looked { crate::titletime::WOKEN_LOOK } else { state.woken };
+                    crate::titletime::lane_idle(idle.elapsed().as_nanos() as u64, empty, why);
+                }
                 (state.asked, state.next)
             };
+            let working = crate::titletime::now();
             self.look(limit);
+            if let Some(working) = working {
+                crate::titletime::lane_worked(working.elapsed().as_nanos() as u64);
+            }
             let mut state = self.lock();
             state.served = state.served.max(asked);
             drop(state);

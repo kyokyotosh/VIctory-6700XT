@@ -88,6 +88,8 @@ pub(crate) extern "system" fn completed(this: This) -> u64 {
 /// The title's `GetCompletedValue`.
 extern "system" fn completed_called(this: This) -> u64 {
     let value = completed(this);
+    #[cfg(windows)]
+    crate::titletime::polled(this as usize, value);
     #[cfg(all(windows, feature = "diagnostics"))]
     crate::timeline::polled(this as usize, value);
     value
@@ -123,6 +125,8 @@ extern "system" fn set_event_on_completion(this: This, value: u64, event: *mut c
         tracing::warn!(value, "blocking fence wait not implemented");
         return E_NOTIMPL;
     }
+    #[cfg(windows)]
+    crate::titletime::fence_event(event as usize);
     waiters.push((value, event as usize));
     S_OK
 }

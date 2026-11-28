@@ -155,7 +155,24 @@ fn with_state(this: This, f: impl FnOnce(&crate::host::HostList, &mut crate::dra
     let started = std::time::Instant::now();
     // SAFETY: the title passes one of our lists.
     let state = unsafe { &(*this.cast::<List>()).state };
-    f(list, &mut state.lock().unwrap_or_else(|e| e.into_inner()));
+    let timed = crate::titletime::list_call();
+    // A list's lock another thread holds is waited for, and timed with
+    // `VICTORY_TITLE_TIME` (only when the try fails: nothing more per call).
+    let mut held = match state.try_lock() {
+        Ok(held) => held,
+        Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => {
+            let began = crate::titletime::now();
+            let held = state.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(began) = began {
+                crate::titletime::add(crate::titletime::Kind::ListLock, began.elapsed().as_nanos() as u64);
+            }
+            held
+        }
+    };
+    f(list, &mut held);
+    drop(held);
+    drop(timed);
     #[cfg(feature = "diagnostics")]
     crate::copystat::recorded(started);
 }

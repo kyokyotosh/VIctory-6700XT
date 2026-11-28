@@ -88,6 +88,11 @@ impl HostPolicy {
             if ours != address {
                 return Some(ours);
             }
+            // With `VICTORY_TITLE_TIME`, what threads wait with is timed.
+            let timed = victory_gpu::titletime::import(name, address);
+            if timed != address {
+                return Some(timed);
+            }
         }
         // With a timeline asked for, what threads wait with is wrapped.
         #[cfg(all(windows, feature = "diagnostics"))]

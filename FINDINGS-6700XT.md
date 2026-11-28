@@ -262,9 +262,25 @@ Without the switch the room kept now follows the targets: 3,072 MB in all until 
 
 The same as 1,600 by hand: none let go, 0.6-1.3 GB more textures on the card (3.3-3.4 → 3.9-4.6 GB), the card under its budget in every sample (the margin never grew), the device kept, the frame unchanged. Before the world the rule is the old one, and the loading screen's artwork showed in both runs; no frame broken (magenta at most 0.06%, black frames only at the loading transition).
 
+## Where the title's threads spend a frame (`VICTORY_TITLE_TIME=1`, 2026-11-28)
+
+Ported from VI-BR-PORT (1e78da5d, `titletime.rs`): the title's imports of the system's waits are bound to timing wrappers only with the switch, and the layer's entry points (submit, present, queue calls, list calls, write faults, settles) note their time per thread; one line with the frame-rate lines. Same save copy, two runs a side: off 13.3 and 12.9 fps (75.1, 77.3 ms), on 13.1 and 12.8 (76.6, 78.4 ms): about 1 ms, within the spread. Medians of the world's lines (`tt-on-a`, `tt-on-b`):
+
+| Per frame | `tt-on-a` | `tt-on-b` |
+|---|---|---|
+| Frame | 75.9 ms | 78.0 ms |
+| Our thread that prepares submissions (`victory-submit`): working | 69.3 ms | 69.3 ms |
+| Same: standing at a wait (card, a value) / idle with nothing to do | 6.8 / 0.0 ms | 8.7 / 0.0 ms |
+| The title's submitting thread: inside its Present call | 24.7 ms | 27.0 ms |
+| Same: its own work (outside every call of ours and every wrapped wait) | 51.1 ms | 50.9 ms |
+| Present to the title's first submission of the next frame | 20.8 ms | 20.3 ms |
+| The title's other 30 threads: write faults on guarded memory | 110.9 ms in 700 | 105.3 ms in 692 |
+
+What sets the frame here is our thread that prepares: never idle for want of work, 69 ms of a 76-78 ms frame, while the title's submitting thread waits about 25 ms of each frame in Present for it. The title's own work on that thread is about 51 ms: our preparing would have to come down by about 20 ms before the title's thread sets the frame [INFERENCE: the title's other threads may lengthen then]. The write faults cost the title's worker threads 0.15-0.16 ms each, about 110 ms of their time a frame; they are not on the submitting thread. The title's list calls go through thin lists and are not timed here ("recording threads 0").
+
 ## Next steps
 
-1. Frame rate: at 1080p output the submitting thread's preparing (~60 ms) sets the frame; at native output (~100 ms a frame) the card (~80 ms of work, ~1 GB over the cut budget). Next: the refreshes and the wait for the heaps' records on the submitting thread. In the heavier street with 4 list threads the frame is about 77 ms and the card 66% busy. `VICTORY_HEAP_PASS_AT_SUBMIT=1` took 3 ms off it (above); the timeline says the title's own threads are most of what is left.
+1. Frame rate: at 1080p output our thread that prepares submissions sets the frame (69 ms working of 76-78, never idle; the title waits ~25 ms in Present for it, above); at native output (~100 ms a frame) the card (~80 ms of work, ~1 GB over the cut budget). Next: the refreshes and the wait for the heaps' records on that thread. `VICTORY_HEAP_PASS_AT_SUBMIT=1` took 3 ms off it (above). The title's write faults (~700 a frame, 0.15 ms each on its worker threads) are the other large cost found.
 2. The card's memory runs slightly over the cut budget late in runs (10,077 / 9,997 MB); keep an eye on the GPU time if it creeps up.
 3. Fix the id 646 / id 538 validation errors separately.
 

@@ -3825,7 +3825,14 @@ pub(crate) fn install() {
             let began = std::time::Instant::now();
             // (Let go again before the next look: the runtime wants the
             // guards to end a change.)
+            let faulted = crate::titletime::now();
             let (opened, _waited) = open_faulted(at);
+            if let Some(faulted) = faulted
+                && ours.is_none()
+            {
+                // (`VICTORY_TITLE_TIME`: a write fault of the title's.)
+                crate::titletime::add(crate::titletime::Kind::Fault, faulted.elapsed().as_nanos() as u64);
+            }
             #[cfg(feature = "diagnostics")]
             let waited = _waited;
             if opened != 0 {

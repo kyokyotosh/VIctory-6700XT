@@ -3460,6 +3460,7 @@ pub(crate) fn settle_now(why: usize) {
     if !late() {
         return;
     }
+    let _timed = crate::titletime::begin(crate::titletime::Kind::Settle);
     let Some(host) = host() else {
         return;
     };
@@ -9404,6 +9405,7 @@ impl Meter {
             crate::descriptor::sync_line(frames);
             late_line(frames);
             crate::queue::behind_line(frames);
+            crate::titletime::line(frames);
             card_clock_line(frames, ms);
             upq::line(frames);
             rec::line(frames);

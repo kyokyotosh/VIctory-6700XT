@@ -570,6 +570,8 @@ extern "system" fn execute(this: This, count: u32, lists: *const This) {
         return;
     }
     let _called = crate::timeline::span("the title's ExecuteCommandLists");
+    #[cfg(windows)]
+    let _timed = crate::titletime::submit_call();
     #[cfg(all(windows, feature = "diagnostics"))]
     crate::timeline::title_thread();
     #[cfg(windows)]
@@ -731,6 +733,8 @@ extern "system" fn signal(this: This, fence: This, value: u64) -> HRESULT {
     }
     let _called = crate::timeline::span("the title's queue Signal");
     #[cfg(windows)]
+    let _timed = crate::titletime::begin(crate::titletime::Kind::Queue);
+    #[cfg(windows)]
     if behind::on() && !this.is_null() {
         behind::signal(this, fence, value);
         return S_OK;
@@ -761,6 +765,8 @@ extern "system" fn wait(this: This, fence: This, value: u64) -> HRESULT {
         return E_INVALIDARG;
     }
     let _called = crate::timeline::span("the title's queue Wait");
+    #[cfg(windows)]
+    let _timed = crate::titletime::begin(crate::titletime::Kind::Queue);
     #[cfg(windows)]
     if !this.is_null() {
         let now = crate::fence::completed(fence);
@@ -920,6 +926,8 @@ extern "system" fn present(
     let _ = this;
     #[cfg(all(windows, feature = "diagnostics"))]
     crate::copystat::present_begins();
+    #[cfg(windows)]
+    let _timed = crate::titletime::present_call();
     let called = crate::timeline::span("the title's Present");
     #[cfg(all(windows, feature = "diagnostics"))]
     crate::timeline::title_thread();
@@ -1189,6 +1197,8 @@ extern "system" fn copy_page_mappings(
     pool_pages: u32,
     _flags: u32,
 ) -> HRESULT {
+    #[cfg(windows)]
+    let _timed = crate::titletime::begin(crate::titletime::Kind::Queue);
     let Some(map) = crate::resource::page_mapper() else {
         return E_INVALIDARG;
     };
